@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment variables
+.env
+**/.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+**/dist/
+build/
+
+# Prisma
+**/prisma/migrations/dev.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor/OS junk
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Package manager locks (optional — see note below)
+# package-lock.json

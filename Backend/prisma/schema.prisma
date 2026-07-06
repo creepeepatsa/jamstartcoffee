@@ -1,0 +1,62 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  first_name     String
+  middle_name     String?
+  last_name     String
+  suffix    String?
+  email     String   @unique
+  password  String
+  role      String   @default("Admin")
+  createdAt DateTime @default(now())
+  isActive Boolean @default(true)
+}
+
+model Sale {
+  id         Int      @id @default(autoincrement())
+  date       DateTime
+  item_name      String
+  category   String
+  net_price  Decimal  @db.Decimal(10, 2)
+  items_sold   Int
+  totalSales Decimal  @db.Decimal(10, 2)
+
+  @@index([date])
+  @@index([item_name])
+}
+
+model Log {
+  id        Int      @id @default(autoincrement())
+  name      String
+  action    String
+  timestamp DateTime @default(now())
+}
+
+model Forecast {
+  id             Int      @id @default(autoincrement())
+  item           String
+  forecastPeriod DateTime
+  forecastValue  Decimal  @db.Decimal(10, 2)
+  mae            Decimal? @db.Decimal(10, 4)
+  rmse           Decimal? @db.Decimal(10, 4)
+  mape           Decimal? @db.Decimal(10, 4)
+  generatedAt    DateTime @default(now())
+
+  @@index([item])
+}
+
+model ImportLog {
+  id         Int      @id @default(autoincrement())
+  filename   String
+  fileHash   String   @unique
+  rowCount   Int
+  importedBy String
+  importedAt DateTime @default(now())
+}
