@@ -1,6 +1,13 @@
 
 import prisma from "../lib/prisma.js";
 
+function monthKeyUTC(dateValue) {
+  const d = new Date(dateValue);
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
 export async function getSalesTrend(req, res) {
   try {
     const { from, to } = req.analyticsQuery;
@@ -107,9 +114,8 @@ export async function getKpiSummary(req, res) {
       WHERE date >= ${from} AND date <= ${to}
     `;
 
-          
-    const currentMonthStart = new Date(to.getFullYear(), to.getMonth(), 1);
-    const previousMonthStart = new Date(to.getFullYear(), to.getMonth() - 1, 1);
+        const currentMonthStart = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), 1));
+        const previousMonthStart = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - 1, 1));
 
     const momPromise = prisma.$queryRaw`
       SELECT
@@ -124,12 +130,11 @@ export async function getKpiSummary(req, res) {
     const [totalsRows, momRows] = await Promise.all([totalsPromise, momPromise]);
     const totals = totalsRows[0] || {};
 
-    const currentMonthRow = momRows.find(
-      (r) => new Date(r.month).getTime() === currentMonthStart.getTime()
-    );
-    const previousMonthRow = momRows.find(
-      (r) => new Date(r.month).getTime() === previousMonthStart.getTime()
-    );
+    const currentMonthKey = monthKeyUTC(currentMonthStart);
+    const previousMonthKey = monthKeyUTC(previousMonthStart);
+
+    const currentMonthRow = momRows.find((r) => monthKeyUTC(r.month) === currentMonthKey);
+    const previousMonthRow = momRows.find((r) => monthKeyUTC(r.month) === previousMonthKey);
 
     const currentMonthRevenue = currentMonthRow?.revenue ?? 0;
     const previousMonthRevenue = previousMonthRow?.revenue ?? 0;

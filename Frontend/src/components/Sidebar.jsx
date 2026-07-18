@@ -6,7 +6,6 @@ import {
   ChevronRight,
   ClipboardList,
   LineChart,
-  BarChart3,
   Settings2,
   UserRound,
   LogOut,
@@ -18,7 +17,6 @@ const navItems = [
   { label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
   { label: 'Sales', icon: ClipboardList, path: '/sales' },
   { label: 'Forecasting', icon: LineChart, path: '/forecasts' },
-  { label: 'Reports', icon: BarChart3, path: '/reports' },
   { label: 'Users', icon: UserRound, path: '/users' },
   { label: 'Settings', icon: Settings2, path: '/settings' },
 ];

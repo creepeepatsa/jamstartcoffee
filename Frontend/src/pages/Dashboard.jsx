@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from 'lucide-react';
+import { Calendar, ChevronLeft, ChevronRight, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from 'lucide-react';
 import {
   Area,
   Bar,
@@ -43,6 +43,11 @@ const monthFormatter = new Intl.DateTimeFormat('en', {
   year: 'numeric',
 });
 
+const monthLabelFormatter = new Intl.DateTimeFormat('en', {
+  month: 'long',
+  year: 'numeric',
+});
+
 function formatDateInput(date) {
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
@@ -64,6 +69,23 @@ function getPeriodRange(period) {
   }
 
   return { from: formatDateInput(new Date(now.getFullYear() - 1, now.getMonth(), 1)), to: formatDateInput(now) };
+}
+
+function getKpiRangeFromMonth(monthValue) {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthValue);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const currentMonthStart = new Date(Date.UTC(year, month - 1, 1));
+  const previousMonthStart = new Date(Date.UTC(year, month - 2, 1));
+  const nextMonthStart = new Date(Date.UTC(year, month, 1));
+  const currentMonthEnd = new Date(nextMonthStart.getTime() - 1);
+
+  return {
+    from: previousMonthStart.toISOString(),
+    to: currentMonthEnd.toISOString(),
+  };
 }
 
 function formatCurrency(value) {
@@ -118,6 +140,10 @@ export default function Dashboard() {
   const [period, setPeriod] = useState('year');
   const [from, setFrom] = useState(defaults.from);
   const [to, setTo] = useState(defaults.to);
+  const [trendPeriod, setTrendPeriod] = useState('year');
+  const [trendFrom, setTrendFrom] = useState(defaults.from);
+  const [trendTo, setTrendTo] = useState(defaults.to);
+  const [kpiMonth, setKpiMonth] = useState('');
 
   const [trendData, setTrendData] = useState([]);
   const [topItemsData, setTopItemsData] = useState([]);
@@ -136,11 +162,41 @@ export default function Dashboard() {
 
   const requestRef = useRef(0);
 
-  const applyPeriod = useCallback((nextPeriod) => {
+  const kpiRange = useMemo(() => {
+    if (!kpiMonth) return { from, to };
+    return getKpiRangeFromMonth(kpiMonth) || { from, to };
+  }, [kpiMonth, from, to]);
+
+  // Helper function to get month labels
+  const getMonthLabels = useCallback(() => {
+    let year, month;
+
+    if (kpiMonth) {
+      const match = /^(\d{4})-(\d{2})$/.exec(kpiMonth);
+      if (!match) return { current: 'N/A', previous: 'N/A' };
+      year = Number(match[1]);
+      month = Number(match[2]);
+    } else {
+      // Use current date if no filter selected
+      const now = new Date();
+      year = now.getFullYear();
+      month = now.getMonth() + 1;
+    }
+
+    const currentDate = new Date(year, month - 1, 1);
+    const previousDate = new Date(year, month - 2, 1);
+
+    return {
+      current: monthLabelFormatter.format(currentDate),
+      previous: monthLabelFormatter.format(previousDate),
+    };
+  }, [kpiMonth]);
+
+  const applyTrendPeriod = useCallback((nextPeriod) => {
     const range = getPeriodRange(nextPeriod);
-    setPeriod(nextPeriod);
-    setFrom(range.from);
-    setTo(range.to);
+    setTrendPeriod(nextPeriod);
+    setTrendFrom(range.from);
+    setTrendTo(range.to);
   }, []);
 
   const loadOverview = useCallback(async () => {
@@ -155,10 +211,10 @@ export default function Dashboard() {
     setKpiError('');
 
     const [trendResult, topItemsResult, categoryResult, kpiResult] = await Promise.allSettled([
-      fetchSalesTrend(from, to),
+      fetchSalesTrend(trendFrom, trendTo),
       fetchTopItems(from, to, 5),
       fetchCategoryBreakdown(from, to),
-      fetchKpiSummary(from, to),
+      fetchKpiSummary(kpiRange.from, kpiRange.to),
     ]);
 
     if (requestId !== requestRef.current) return;
@@ -195,7 +251,7 @@ export default function Dashboard() {
     setTopItemsLoading(false);
     setCategoryLoading(false);
     setKpiLoading(false);
-  }, [from, to]);
+  }, [trendFrom, trendTo, from, to, kpiRange]);
 
   useEffect(() => {
     void loadOverview();
@@ -244,12 +300,14 @@ export default function Dashboard() {
     void loadOverview();
   };
 
-  const isCurrentPeriod = (value) => period === value;
+  const isCurrentTrendPeriod = (value) => trendPeriod === value;
 
   const momChangePct = kpiData?.monthOverMonth?.changePct ?? null;
   const isGrowthPositive = momChangePct !== null && momChangePct >= 0;
   const currentMonthRevenue = kpiData?.monthOverMonth?.currentMonthRevenue ?? 0;
   const previousMonthRevenue = kpiData?.monthOverMonth?.previousMonthRevenue ?? 0;
+
+  const { current: currentLabel, previous: previousLabel } = getMonthLabels();
 
   return (
     <section className="grid gap-6">
@@ -290,9 +348,9 @@ export default function Dashboard() {
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => applyPeriod(option.value)}
+                  onClick={() => applyTrendPeriod(option.value)}
                   className={`inline-flex items-center gap-1 rounded-full px-4 py-2 text-[0.65rem] font-semibold uppercase tracking-[0.22em] transition ${
-                    isCurrentPeriod(option.value)
+                    isCurrentTrendPeriod(option.value)
                       ? 'bg-emerald-950 text-white shadow-sm shadow-emerald-950/10'
                       : 'border border-emerald-900/10 bg-white text-emerald-900/70 hover:bg-emerald-50'
                   }`}
@@ -394,7 +452,34 @@ export default function Dashboard() {
           )}
         </SectionCard>
 
-        <SectionCard title="Month over month growth" description="Current month revenue vs previous month." className="xl:col-span-2">
+        <SectionCard
+          title="Month over month growth"
+          description="Current month revenue vs previous month."
+          className="xl:col-span-2"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white px-3 py-2 text-sm text-emerald-950 shadow-sm shadow-emerald-950/5">
+                <Calendar className="h-4 w-4 shrink-0 text-emerald-900/45" />
+                <input
+                  type="month"
+                  value={kpiMonth}
+                  onChange={(e) => setKpiMonth(e.target.value)}
+                  className="bg-transparent text-sm text-emerald-950 outline-none"
+                />
+              </label>
+
+              {kpiMonth && (
+                <button
+                  type="button"
+                  onClick={() => setKpiMonth('')}
+                  className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2 text-xs font-medium uppercase tracking-[0.2em] text-emerald-900/60 transition hover:bg-emerald-50 hover:text-emerald-950"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          }
+        >
           {kpiError ? (
             <EmptyState title="Growth data unavailable" description={kpiError} />
           ) : kpiLoading ? (
@@ -423,11 +508,11 @@ export default function Dashboard() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">This month</p>
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{currentLabel}</p>
                   <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(currentMonthRevenue)}</p>
                 </div>
                 <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">Last month</p>
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{previousLabel}</p>
                   <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(previousMonthRevenue)}</p>
                 </div>
               </div>

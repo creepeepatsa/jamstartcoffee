@@ -20,6 +20,41 @@ const parseMonthRange = (monthValue) => {
   return { startDate, endDate };
 };
 
+const parseImportedDate = (rawValue) => {
+  if (rawValue === null || rawValue === undefined) return null;
+
+  if (rawValue instanceof Date && !Number.isNaN(rawValue.getTime())) {
+    return new Date(Date.UTC(rawValue.getUTCFullYear(), rawValue.getUTCMonth(), rawValue.getUTCDate()));
+  }
+
+  const value = String(rawValue).trim();
+  if (!value) return null;
+
+  // Strict YYYY-MM-DD (from CSV exports/inputs)
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  // Common spreadsheet format MM/DD/YYYY
+  const slashMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value);
+  if (slashMatch) {
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    const year = Number(slashMatch[3]);
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  // Fallback for textual dates; normalize to UTC date-only to avoid timezone drift.
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
+};
+
 const REQUIRED_COLUMNS = ['Date', 'Item Name', 'Category', 'Net Price', 'Items Sold', 'Total Sales'];
 const MAX_ROWS_PER_IMPORT = 50000; // sanity ceiling — prevents a bad/huge file from freezing the server
 
@@ -79,7 +114,8 @@ export const importSales = async (req, res) => {
           if (rowNumber === 1) return;
           const rowData = {};
           row.eachCell((cell, colNumber) => {
-            rowData[headers[colNumber]] = cell.text.trim();
+            const header = headers[colNumber];
+            rowData[header] = header === 'Date' ? cell.value : cell.text.trim();
           });
           rows.push(rowData);
         });
@@ -123,14 +159,14 @@ export const importSales = async (req, res) => {
 
       const item_name = row['Item Name']?.trim();
       const category = row['Category']?.trim();
-      const date = new Date(row['Date']);
+      const date = parseImportedDate(row['Date']);
       const net_price = parseFloat(row['Net Price']);
       const items_sold = parseInt(row['Items Sold'], 10);
       const totalSales = parseFloat(row['Total Sales']);
 
       if (!item_name) rowErrors.push('Item Name is missing');
       if (!category) rowErrors.push('Category is missing');
-      if (isNaN(date.getTime())) rowErrors.push('Date is invalid or missing');
+      if (!date || Number.isNaN(date.getTime())) rowErrors.push('Date is invalid or missing');
 
       if (isNaN(net_price)) {
         rowErrors.push('Net Price is not a valid number');
@@ -208,9 +244,181 @@ export const importSales = async (req, res) => {
   }
 };
 
+// ── Report builders ──────────────────────────────
+// Each report type has its own shape, so export just needs a {columns, rows}
+// pair — columns drive both the XLSX header row and CSV header line, keyed
+// the same way so a single writer can handle every report type below.
+
+const REPORT_TYPES = ['sales_report', 'mom_report', 'yoy_report', 'category_performance', 'item_performance'];
+
+const monthKey = (date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+
+const monthLabel = (key) => {
+  const [year, month] = key.split('-');
+  const asDate = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  return asDate.toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+};
+
+const pctChange = (current, previous) => {
+  if (!previous) return null;
+  return ((current - previous) / previous) * 100;
+};
+
+const buildSalesReport = (sales) => ({
+  columns: [
+    { header: 'Date', key: 'date', width: 15 },
+    { header: 'Item Name', key: 'item_name', width: 25 },
+    { header: 'Category', key: 'category', width: 20 },
+    { header: 'Net Price', key: 'net_price', width: 12 },
+    { header: 'Items Sold', key: 'items_sold', width: 12 },
+    { header: 'Total Sales', key: 'totalSales', width: 15 },
+  ],
+  rows: sales.map((sale) => ({
+    date: sale.date.toISOString().split('T')[0],
+    item_name: sale.item_name,
+    category: sale.category,
+    net_price: sale.net_price,
+    items_sold: sale.items_sold,
+    totalSales: sale.totalSales,
+  })),
+});
+
+const buildMoMReport = (sales) => {
+  const byMonth = new Map();
+
+  for (const sale of sales) {
+    const key = monthKey(sale.date);
+    const existing = byMonth.get(key) || { totalSales: 0, items_sold: 0 };
+    existing.totalSales += sale.totalSales;
+    existing.items_sold += sale.items_sold;
+    byMonth.set(key, existing);
+  }
+
+  const sortedKeys = [...byMonth.keys()].sort();
+
+  const rows = sortedKeys.map((key, index) => {
+    const current = byMonth.get(key);
+    const previous = index > 0 ? byMonth.get(sortedKeys[index - 1]) : null;
+    const change = previous ? pctChange(current.totalSales, previous.totalSales) : null;
+
+    return {
+      month: monthLabel(key),
+      totalSales: Number(current.totalSales.toFixed(2)),
+      items_sold: current.items_sold,
+      momChangePct: change === null ? 'N/A' : `${change.toFixed(1)}%`,
+    };
+  });
+
+  return {
+    columns: [
+      { header: 'Month', key: 'month', width: 15 },
+      { header: 'Total Sales', key: 'totalSales', width: 15 },
+      { header: 'Items Sold', key: 'items_sold', width: 12 },
+      { header: 'MoM Change', key: 'momChangePct', width: 12 },
+    ],
+    rows,
+  };
+};
+
+// month (YYYY-MM), if given, narrows WHICH calendar month to compare across
+// years — it should not restrict the query to a single year, so exportSales
+// deliberately skips applying it as a date-range filter for this report type.
+const buildYoYReport = (sales, month) => {
+  const monthOfYear = month ? Number(month.slice(5, 7)) : null;
+  const byYear = new Map();
+
+  for (const sale of sales) {
+    if (monthOfYear && sale.date.getUTCMonth() + 1 !== monthOfYear) continue;
+
+    const year = sale.date.getUTCFullYear();
+    const existing = byYear.get(year) || { totalSales: 0, items_sold: 0 };
+    existing.totalSales += sale.totalSales;
+    existing.items_sold += sale.items_sold;
+    byYear.set(year, existing);
+  }
+
+  const sortedYears = [...byYear.keys()].sort((a, b) => a - b);
+
+  const rows = sortedYears.map((year, index) => {
+    const current = byYear.get(year);
+    const previous = index > 0 ? byYear.get(sortedYears[index - 1]) : null;
+    const change = previous ? pctChange(current.totalSales, previous.totalSales) : null;
+
+    return {
+      period: monthOfYear ? monthLabel(`${year}-${String(monthOfYear).padStart(2, '0')}`) : String(year),
+      totalSales: Number(current.totalSales.toFixed(2)),
+      items_sold: current.items_sold,
+      yoyChangePct: change === null ? 'N/A' : `${change.toFixed(1)}%`,
+    };
+  });
+
+  return {
+    columns: [
+      { header: monthOfYear ? 'Period' : 'Year', key: 'period', width: 15 },
+      { header: 'Total Sales', key: 'totalSales', width: 15 },
+      { header: 'Items Sold', key: 'items_sold', width: 12 },
+      { header: 'YoY Change', key: 'yoyChangePct', width: 12 },
+    ],
+    rows,
+  };
+};
+
+const buildCategoryPerformance = async (where) => {
+  const grouped = await prisma.sale.groupBy({
+    by: ['category'],
+    where,
+    _sum: { totalSales: true, items_sold: true },
+    orderBy: { _sum: { totalSales: 'desc' } },
+  });
+
+  return {
+    columns: [
+      { header: 'Category', key: 'category', width: 20 },
+      { header: 'Total Sales', key: 'totalSales', width: 15 },
+      { header: 'Items Sold', key: 'items_sold', width: 12 },
+    ],
+    rows: grouped.map((g) => ({
+      category: g.category,
+      totalSales: Number((g._sum.totalSales || 0).toFixed(2)),
+      items_sold: g._sum.items_sold || 0,
+    })),
+  };
+};
+
+const buildItemPerformance = async (where) => {
+  const grouped = await prisma.sale.groupBy({
+    by: ['item_name', 'category'],
+    where,
+    _sum: { totalSales: true, items_sold: true },
+    orderBy: { _sum: { totalSales: 'desc' } },
+  });
+
+  return {
+    columns: [
+      { header: 'Item Name', key: 'item_name', width: 25 },
+      { header: 'Category', key: 'category', width: 20 },
+      { header: 'Total Sales', key: 'totalSales', width: 15 },
+      { header: 'Items Sold', key: 'items_sold', width: 12 },
+    ],
+    rows: grouped.map((g) => ({
+      item_name: g.item_name,
+      category: g.category,
+      totalSales: Number((g._sum.totalSales || 0).toFixed(2)),
+      items_sold: g._sum.items_sold || 0,
+    })),
+  };
+};
+
 export const exportSales = async (req, res) => {
   try {
-    const { startDate, endDate, month, category, format = 'csv' } = req.query;
+    const { startDate, endDate, month, category, format = 'csv', reportType = 'sales_report' } = req.query;
+
+    // ── Validate reportType ──────────────────────────────
+    if (!REPORT_TYPES.includes(reportType)) {
+      return res
+        .status(400)
+        .json({ error: `Invalid reportType "${reportType}". Must be one of: ${REPORT_TYPES.join(', ')}` });
+    }
 
     // ── Validate format ──────────────────────────────
     const allowedFormats = ['csv', 'xlsx'];
@@ -227,7 +435,10 @@ export const exportSales = async (req, res) => {
       return res.status(400).json({ error: 'Invalid month — use YYYY-MM format' });
     }
 
-    if (monthRange) {
+    // YoY compares the same calendar month across every year in the data, so
+    // treating `month` as a hard date-range filter would wrongly collapse it
+    // to a single year. Every other report type applies it normally.
+    if (monthRange && reportType !== 'yoy_report') {
       parsedStart = monthRange.startDate;
       parsedEnd = monthRange.endDate;
       monthMode = true;
@@ -251,8 +462,6 @@ export const exportSales = async (req, res) => {
       return res.status(400).json({ error: 'startDate cannot be after endDate' });
     }
 
-    // One of the two provided without the other still works (open-ended range),
-    // but flag the ambiguous case where only one bound makes the filter unclear
     const where = {};
     if (parsedStart || parsedEnd) {
       where.date = {};
@@ -263,68 +472,59 @@ export const exportSales = async (req, res) => {
       where.category = category;
     }
 
-    const sales = await prisma.sale.findMany({
-      where,
-      orderBy: { date: 'asc' },
-    });
+    // ── Build report ──────────────────────────────
+    let columns;
+    let rows;
+
+    if (reportType === 'category_performance') {
+      ({ columns, rows } = await buildCategoryPerformance(where));
+    } else if (reportType === 'item_performance') {
+      ({ columns, rows } = await buildItemPerformance(where));
+    } else {
+      // sales_report, mom_report, and yoy_report all start from the raw matching rows
+      const sales = await prisma.sale.findMany({ where, orderBy: { date: 'asc' } });
+
+      if (sales.length === 0) {
+        return res.status(404).json({ error: 'No sales records match the given filters' });
+      }
+
+      if (reportType === 'mom_report') {
+        ({ columns, rows } = buildMoMReport(sales));
+      } else if (reportType === 'yoy_report') {
+        ({ columns, rows } = buildYoYReport(sales, month));
+      } else {
+        ({ columns, rows } = buildSalesReport(sales));
+      }
+    }
 
     // ── Validate there's actually something to export ──────────────────────────────
-    if (sales.length === 0) {
+    if (!rows || rows.length === 0) {
       return res.status(404).json({ error: 'No sales records match the given filters' });
     }
 
     if (format === 'xlsx') {
       const workbook = new ExcelJS.Workbook();
-      const sheet = workbook.addWorksheet('Sales');
-
-      sheet.columns = [
-        { header: 'Date', key: 'date', width: 15 },
-        { header: 'Item Name', key: 'item_name', width: 25 },
-        { header: 'Category', key: 'category', width: 20 },
-        { header: 'Net Price', key: 'net_price', width: 12 },
-        { header: 'Items Sold', key: 'items_sold', width: 12 },
-        { header: 'Total Sales', key: 'totalSales', width: 15 },
-      ];
-
-      sales.forEach((sale) => {
-        sheet.addRow({
-          date: sale.date.toISOString().split('T')[0],
-          item_name: sale.item_name,
-          category: sale.category,
-          net_price: sale.net_price,
-          items_sold: sale.items_sold,
-          totalSales: sale.totalSales,
-        });
-      });
+      const sheet = workbook.addWorksheet('Report');
+      sheet.columns = columns;
+      rows.forEach((row) => sheet.addRow(row));
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=sales_export.xlsx');
+      res.setHeader('Content-Disposition', `attachment; filename=${reportType}.xlsx`);
       await workbook.xlsx.write(res);
       res.end();
     } else {
-      const header = 'Date,Item Name,Category,Net Price,Items Sold,Total Sales\n';
-      const csvRows = sales
-        .map((s) =>
-          [
-            s.date.toISOString().split('T')[0],
-            s.item_name,
-            s.category,
-            s.net_price,
-            s.items_sold,
-            s.totalSales,
-          ].join(',')
-        )
-        .join('\n');
+      const header = columns.map((c) => c.header).join(',') + '\n';
+      const csvRows = rows.map((row) => columns.map((c) => row[c.key]).join(',')).join('\n');
 
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename=sales_export.csv');
+      res.setHeader('Content-Disposition', `attachment; filename=${reportType}.csv`);
       res.send(header + csvRows);
     }
 
     await prisma.log.create({
       data: {
         name: req.user?.email || 'unknown',
-        action: `Exported ${sales.length} sales rows (${format})`,
+        action: `Exported ${reportType} report (${rows.length} rows, ${format})`,
       },
     });
   } catch (error) {
