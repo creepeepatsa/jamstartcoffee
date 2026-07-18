@@ -1,17 +1,6 @@
-// controllers/analytics.controller.js
-//
-// Read-only analytics over the Sale table (Prisma). Every handler here is a
-// GET — no writes. Raw SQL is used only where Prisma's query builder can't
-// express date-truncated grouping (monthly trends); everything else uses
-// the Prisma client directly.
-//
-// Adjust the import path below to wherever your prisma.js singleton lives.
+
 import prisma from "../lib/prisma.js";
 
-// ---------------------------------------------------------------------------
-// GET /api/analytics/sales-trend
-// Monthly totals over time: revenue + units sold per month, within range.
-// ---------------------------------------------------------------------------
 export async function getSalesTrend(req, res) {
   try {
     const { from, to } = req.analyticsQuery;
@@ -41,10 +30,7 @@ export async function getSalesTrend(req, res) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// GET /api/analytics/top-items
-// Top-selling items by revenue within range, with category attached.
-// ---------------------------------------------------------------------------
+
 export async function getTopItems(req, res) {
   try {
     const { from, to, limit } = req.analyticsQuery;
@@ -77,10 +63,7 @@ export async function getTopItems(req, res) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// GET /api/analytics/category-breakdown
-// Revenue + units grouped by category within range.
-// ---------------------------------------------------------------------------
+
 export async function getCategoryBreakdown(req, res) {
   try {
     const { from, to } = req.analyticsQuery;
@@ -110,11 +93,7 @@ export async function getCategoryBreakdown(req, res) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// GET /api/analytics/kpi-summary
-// Total revenue, total units sold (in range), plus month-over-month % change
-// comparing the most recent full/partial month in range vs the one before it.
-// ---------------------------------------------------------------------------
+
 export async function getKpiSummary(req, res) {
   try {
     const { from, to } = req.analyticsQuery;
@@ -128,7 +107,7 @@ export async function getKpiSummary(req, res) {
       WHERE date >= ${from} AND date <= ${to}
     `;
 
-    // Last two calendar months relative to "to", for MoM comparison.
+          
     const currentMonthStart = new Date(to.getFullYear(), to.getMonth(), 1);
     const previousMonthStart = new Date(to.getFullYear(), to.getMonth() - 1, 1);
 

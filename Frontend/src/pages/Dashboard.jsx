@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, RefreshCcw, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from 'lucide-react';
 import {
   Area,
   Bar,
@@ -18,7 +18,7 @@ import {
 } from 'recharts';
 
 import { useAuth } from '../context/AuthContext';
-import { fetchCategoryBreakdown, fetchSalesTrend, fetchTopItems } from '../api/analytics';
+import { fetchCategoryBreakdown, fetchKpiSummary, fetchSalesTrend, fetchTopItems } from '../api/analytics';
 
 const periodOptions = [
   { label: 'All Time', value: 'all' },
@@ -28,6 +28,7 @@ const periodOptions = [
 ];
 
 const categoryPalette = ['#14532d', '#166534', '#15803d', '#65a30d', '#84cc16', '#a3e635', '#4d7c0f', '#f59e0b'];
+const itemPalette = ['#0f766e', '#0891b2', '#0369a1', '#4338ca', '#7c3aed', '#a21caf', '#be123c', '#c2410c'];
 
 const currencyFormatter = new Intl.NumberFormat('en-PH', {
   style: 'currency',
@@ -77,6 +78,12 @@ function formatMonth(value) {
   return monthFormatter.format(new Date(value));
 }
 
+function formatPercent(value) {
+  if (value === null || value === undefined) return 'N/A';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(1)}%`;
+}
+
 function SectionCard({ title, description, action, children, className = '' }) {
   return (
     <section className={`rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] p-5 shadow-sm shadow-emerald-950/5 sm:p-6 ${className}`}>
@@ -115,14 +122,17 @@ export default function Dashboard() {
   const [trendData, setTrendData] = useState([]);
   const [topItemsData, setTopItemsData] = useState([]);
   const [categoryData, setCategoryData] = useState([]);
+  const [kpiData, setKpiData] = useState(null);
 
   const [trendLoading, setTrendLoading] = useState(true);
   const [topItemsLoading, setTopItemsLoading] = useState(true);
   const [categoryLoading, setCategoryLoading] = useState(true);
+  const [kpiLoading, setKpiLoading] = useState(true);
 
   const [trendError, setTrendError] = useState('');
   const [topItemsError, setTopItemsError] = useState('');
   const [categoryError, setCategoryError] = useState('');
+  const [kpiError, setKpiError] = useState('');
 
   const requestRef = useRef(0);
 
@@ -138,14 +148,17 @@ export default function Dashboard() {
     setTrendLoading(true);
     setTopItemsLoading(true);
     setCategoryLoading(true);
+    setKpiLoading(true);
     setTrendError('');
     setTopItemsError('');
     setCategoryError('');
+    setKpiError('');
 
-    const [trendResult, topItemsResult, categoryResult] = await Promise.allSettled([
+    const [trendResult, topItemsResult, categoryResult, kpiResult] = await Promise.allSettled([
       fetchSalesTrend(from, to),
       fetchTopItems(from, to, 5),
       fetchCategoryBreakdown(from, to),
+      fetchKpiSummary(from, to),
     ]);
 
     if (requestId !== requestRef.current) return;
@@ -171,9 +184,17 @@ export default function Dashboard() {
       setCategoryError(categoryResult.reason?.response?.data?.error || 'Unable to load category breakdown.');
     }
 
+    if (kpiResult.status === 'fulfilled') {
+      setKpiData(kpiResult.value || null);
+    } else {
+      setKpiData(null);
+      setKpiError(kpiResult.reason?.response?.data?.error || 'Unable to load month over month growth.');
+    }
+
     setTrendLoading(false);
     setTopItemsLoading(false);
     setCategoryLoading(false);
+    setKpiLoading(false);
   }, [from, to]);
 
   useEffect(() => {
@@ -201,6 +222,15 @@ export default function Dashboard() {
     [topItemsData]
   );
 
+  const itemShareChartData = useMemo(
+    () =>
+      topItemsData.map((entry) => ({
+        name: entry.itemName,
+        value: Number(entry.revenue) || 0,
+      })),
+    [topItemsData]
+  );
+
   const categoryChartData = useMemo(
     () =>
       categoryData.map((entry) => ({
@@ -215,6 +245,11 @@ export default function Dashboard() {
   };
 
   const isCurrentPeriod = (value) => period === value;
+
+  const momChangePct = kpiData?.monthOverMonth?.changePct ?? null;
+  const isGrowthPositive = momChangePct !== null && momChangePct >= 0;
+  const currentMonthRevenue = kpiData?.monthOverMonth?.currentMonthRevenue ?? 0;
+  const previousMonthRevenue = kpiData?.monthOverMonth?.previousMonthRevenue ?? 0;
 
   return (
     <section className="grid gap-6">
@@ -327,6 +362,75 @@ export default function Dashboard() {
                   </Pie>
                 </PieChart>
               </ResponsiveContainer>
+            </div>
+          )}
+        </SectionCard>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-5">
+        <SectionCard title="Item revenue share" description="Revenue share by product for the selected period." className="xl:col-span-3">
+          {topItemsError ? (
+            <EmptyState title="Item revenue share unavailable" description={topItemsError} />
+          ) : topItemsLoading ? (
+            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
+              Loading item revenue share...
+            </div>
+          ) : itemShareChartData.length === 0 ? (
+            <EmptyState title="No item revenue data yet" description="Try a wider period preset to surface product performance." />
+          ) : (
+            <div className="h-[22rem]">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Tooltip formatter={(value) => formatCurrency(value)} />
+                  <Legend />
+                  <Pie data={itemShareChartData} dataKey="value" nameKey="name" innerRadius={72} outerRadius={108} paddingAngle={3}>
+                    {itemShareChartData.map((entry, index) => (
+                      <Cell key={entry.name} fill={itemPalette[index % itemPalette.length]} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </SectionCard>
+
+        <SectionCard title="Month over month growth" description="Current month revenue vs previous month." className="xl:col-span-2">
+          {kpiError ? (
+            <EmptyState title="Growth data unavailable" description={kpiError} />
+          ) : kpiLoading ? (
+            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
+              Loading growth data...
+            </div>
+          ) : momChangePct === null ? (
+            <EmptyState title="Not enough data" description="Previous month has no recorded sales to compare against." />
+          ) : (
+            <div className="flex h-[22rem] flex-col justify-center gap-6">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`flex h-14 w-14 items-center justify-center rounded-2xl ${
+                    isGrowthPositive ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-600'
+                  }`}
+                >
+                  {isGrowthPositive ? <TrendingUp className="h-7 w-7" /> : <TrendingDown className="h-7 w-7" />}
+                </div>
+                <div>
+                  <p className={`text-3xl font-semibold ${isGrowthPositive ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {formatPercent(momChangePct)}
+                  </p>
+                  <p className="text-sm text-emerald-900/60">vs. last month</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">This month</p>
+                  <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(currentMonthRevenue)}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">Last month</p>
+                  <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(previousMonthRevenue)}</p>
+                </div>
+              </div>
             </div>
           )}
         </SectionCard>
