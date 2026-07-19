@@ -1,5 +1,5 @@
-
 import prisma from "../lib/prisma.js";
+import axios from "axios";
 
 function monthKeyUTC(dateValue) {
   const d = new Date(dateValue);
@@ -204,5 +204,92 @@ export async function getSalesTable(req, res) {
   } catch (err) {
     console.error("getSalesTable error:", err);
     res.status(500).json({ error: "Failed to load sales table." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/analytics/forecast
+// Calls the Python (FastAPI) forecasting microservice and returns predicted
+// future sales. The Python service reads from the same "Sale" table directly.
+// ---------------------------------------------------------------------------
+const FORECAST_SERVICE_URL =
+  process.env.FORECAST_SERVICE_URL || "http://localhost:8000";
+
+export async function getSalesForecast(req, res) {
+  try {
+    const { monthsAhead = 3, category, item } = req.query;
+
+    const parsedMonthsAhead = parseInt(monthsAhead, 10);
+    if (isNaN(parsedMonthsAhead) || parsedMonthsAhead < 1 || parsedMonthsAhead > 24) {
+      return res
+        .status(400)
+        .json({ error: "monthsAhead must be a number between 1 and 24." });
+    }
+
+    const { data } = await axios.get(`${FORECAST_SERVICE_URL}/forecast/sales`, {
+      params: {
+        months_ahead: parsedMonthsAhead,
+        category: category || undefined,
+        item_name: item || undefined,
+      },
+      timeout: 15000, // Prophet fitting can take a couple seconds
+    });
+
+    if (data.error) {
+      return res.status(422).json({ error: data.error });
+    }
+
+    res.json(data);
+  } catch (err) {
+    if (err.code === "ECONNREFUSED") {
+      console.error("getSalesForecast error: forecasting service is not running");
+      return res.status(503).json({
+        error: "Forecasting service is unavailable. Make sure the Python service is running.",
+      });
+    }
+
+    console.error("getSalesForecast error:", err.message);
+    res.status(500).json({ error: "Failed to generate sales forecast." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/analytics/forecast-by-category
+// Calls the Python forecasting microservice for a PER-CATEGORY breakdown of
+// expected items sold. Each category comes back with its own history,
+// forecast, and a "method" field ("prophet" or "simple_average") so the
+// frontend can indicate which categories have a more/less reliable forecast.
+// ---------------------------------------------------------------------------
+export async function getItemsForecastByCategory(req, res) {
+  try {
+    const { monthsAhead = 3 } = req.query;
+
+    const parsedMonthsAhead = parseInt(monthsAhead, 10);
+    if (isNaN(parsedMonthsAhead) || parsedMonthsAhead < 1 || parsedMonthsAhead > 24) {
+      return res
+        .status(400)
+        .json({ error: "monthsAhead must be a number between 1 and 24." });
+    }
+
+    const { data } = await axios.get(`${FORECAST_SERVICE_URL}/forecast/items-by-category`, {
+      params: { months_ahead: parsedMonthsAhead },
+      timeout: 20000, // multiple category models take longer than a single forecast
+    });
+
+    if (data.error) {
+      return res.status(422).json({ error: data.error });
+    }
+
+    res.json(data);
+  } catch (err) {
+    if (err.code === "ECONNREFUSED") {
+      console.error("getItemsForecastByCategory error: forecasting service is not running");
+      return res.status(503).json({
+        error: "Forecasting service is unavailable. Make sure the Python service is running.",
+      });
+    }
+
+    console.error("getItemsForecastByCategory error:", err.message);
+    res.status(500).json({ error: "Failed to generate items-by-category forecast." });
   }
 }

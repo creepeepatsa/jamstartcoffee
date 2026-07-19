@@ -27,5 +27,11 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+
+venv/
+.env
+__pycache__/
+*.pyc   
+
 # Package manager locks (optional — see note below)
 # package-lock.json

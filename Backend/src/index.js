@@ -17,6 +17,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/sales', salesRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
+
 app.get('/', (req, res) => {
   res.json({ message: 'JamstartCoffee API is running' });
 });
