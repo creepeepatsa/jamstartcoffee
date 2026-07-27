@@ -38,6 +38,24 @@ async function fetchJSON(url) {
   return data;
 }
 
+// Custom tooltip so we can hide the "range" series instead of relying on
+// a formatter returning null (inconsistent across Recharts versions).
+function RevenueTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const visible = payload.filter((p) => p.dataKey !== 'range' && p.value != null);
+  if (!visible.length) return null;
+  return (
+    <div className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm shadow-sm">
+      <p className="mb-1 font-medium text-emerald-950">{label}</p>
+      {visible.map((p) => (
+        <p key={p.dataKey} style={{ color: p.stroke }}>
+          {p.name}: {peso(p.value)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export default function Forecasts() {
   const [monthsAhead, setMonthsAhead] = useState(3);
   const [category, setCategory] = useState('');
@@ -96,8 +114,6 @@ export default function Forecasts() {
     [byCategory]
   );
 
-  // Merge history + forecast into one timeline, bridging the last actual
-  // point into the first forecast point so the line reads as continuous.
   const revenueChartData = useMemo(() => {
     if (!revenue) return [];
     const history = (revenue.history ?? []).map((h) => ({
@@ -130,9 +146,8 @@ export default function Forecasts() {
       ? ((firstForecast - lastActual) / lastActual) * 100
       : null;
 
-  // Rank categories by total projected units across the selected window.
   const categoryRanking = useMemo(() => {
-    if (!byCategory?.categories) return [];
+    if (!byCategory?.categories?.length) return [];
     return byCategory.categories
       .map((c) => ({
         category: c.category,
@@ -143,6 +158,13 @@ export default function Forecasts() {
       }))
       .sort((a, b) => b.totalUnits - a.totalUnits);
   }, [byCategory]);
+
+  // Use whichever category actually has forecast months, in case the
+  // top-ranked one is empty for some reason.
+  const tableMonths = useMemo(() => {
+    const withMonths = categoryRanking.find((c) => c.forecast.length);
+    return withMonths?.forecast ?? [];
+  }, [categoryRanking]);
 
   return (
     <section className="grid gap-6">
@@ -227,18 +249,17 @@ export default function Forecasts() {
                 <AlertCircle className="h-5 w-5" />
                 <p className="max-w-xs text-sm">{revenueError}</p>
               </div>
+            ) : revenueChartData.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-emerald-900/50">
+                No forecast data available.
+              </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={revenueChartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#d6e2db" />
                   <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
                   <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={peso} width={70} />
-                  <Tooltip
-                    formatter={(value, name) =>
-                      name === 'Confidence range' ? null : [peso(value), name]
-                    }
-                    contentStyle={{ borderRadius: '16px', border: '1px solid #d6e2db', background: '#fff' }}
-                  />
+                  <Tooltip content={<RevenueTooltip />} />
                   <Area
                     dataKey="range"
                     stroke="none"
@@ -341,6 +362,10 @@ export default function Forecasts() {
                 <div className="flex h-full items-center justify-center text-center text-sm text-white/60">
                   {categoryError}
                 </div>
+              ) : categoryRanking.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-sm text-white/50">
+                  No category data available.
+                </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={categoryRanking} layout="vertical" margin={{ top: 0, right: 20, left: 0, bottom: 0 }}>
@@ -390,12 +415,16 @@ export default function Forecasts() {
             <div className="flex items-center justify-center gap-2 py-10 text-emerald-900/60">
               <AlertCircle className="h-4 w-4" /> {categoryError}
             </div>
+          ) : categoryRanking.length === 0 ? (
+            <div className="py-10 text-center text-sm text-emerald-900/50">
+              No category forecasts available.
+            </div>
           ) : (
             <table className="w-full min-w-[640px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-emerald-900/10 text-left text-xs uppercase tracking-[0.2em] text-lime-700/60">
                   <th className="py-3 pr-4">Category</th>
-                  {categoryRanking[0]?.forecast.map((f) => (
+                  {tableMonths.map((f) => (
                     <th key={f.month} className="py-3 pr-4 text-right">
                       {f.month}
                     </th>
@@ -407,11 +436,14 @@ export default function Forecasts() {
                 {categoryRanking.map((c) => (
                   <tr key={c.category} className="border-b border-emerald-900/5">
                     <td className="py-3 pr-4 font-medium text-emerald-950">{c.category}</td>
-                    {c.forecast.map((f) => (
-                      <td key={f.month} className="py-3 pr-4 text-right text-emerald-900/80">
-                        {f.predictedUnits}
-                      </td>
-                    ))}
+                    {tableMonths.map((month) => {
+                      const match = c.forecast.find((f) => f.month === month.month);
+                      return (
+                        <td key={month.month} className="py-3 pr-4 text-right text-emerald-900/80">
+                          {match?.predictedUnits ?? '—'}
+                        </td>
+                      );
+                    })}
                     <td className="py-3 pl-4 text-right">
                       <span
                         title={c.note || undefined}

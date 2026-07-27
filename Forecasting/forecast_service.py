@@ -1,5 +1,6 @@
 import logging
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -138,6 +139,41 @@ def run_simple_average_forecast(category_df: pd.DataFrame, months_ahead: int) ->
     return forecast
 
 
+def interpret_accuracy(mae: float, rmse: float, mape: Optional[float]) -> dict:
+    """
+    Translates raw backtest metrics into a plain verdict.
+
+    Ideal ranges:
+      - MAPE: <=10% excellent, 10-20% acceptable, >20% poor
+      - MAE:  <=5000 good, otherwise high (revenue scale — see note below
+              if reusing this for a units-based backtest)
+      - RMSE: should stay close to MAE; a big gap (ratio > 1.5) means
+              a few months had much bigger misses than the rest (outliers)
+    """
+    if mape is None:
+        mape_verdict = "n/a"
+    elif mape <= 10:
+        mape_verdict = "excellent"
+    elif mape <= 20:
+        mape_verdict = "acceptable"
+    else:
+        mape_verdict = "poor"
+
+    mae_verdict = "good" if mae <= 5000 else "high"
+
+    if mae == 0:
+        rmse_verdict = "n/a"
+    else:
+        ratio = rmse / mae
+        rmse_verdict = "consistent" if ratio <= 1.5 else "inconsistent (possible outlier months)"
+
+    return {
+        "mape": mape_verdict,
+        "mae": mae_verdict,
+        "rmse": rmse_verdict,
+    }
+
+
 def run_backtest(df: pd.DataFrame, holdout_months: int) -> dict:
     """
     Trains Prophet on all data EXCEPT the last `holdout_months`,
@@ -190,9 +226,110 @@ def run_backtest(df: pd.DataFrame, holdout_months: int) -> dict:
     }
 
 
+def run_backtest_units(category_df: pd.DataFrame, holdout_months: int) -> dict:
+    """
+    Same idea as run_backtest(), but for units sold within a single
+    category instead of overall revenue. Used by the categorical
+    backtest endpoint, kept separate from run_backtest() since the
+    two operate on different columns (units vs revenue) and different
+    source dataframes (per-category vs whole-store).
+    """
+    prophet_df = category_df.rename(columns={"month": "ds", "total_units": "y"})[["ds", "y"]]
+    prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
+
+    train_df = prophet_df.iloc[:-holdout_months]
+    test_df = prophet_df.iloc[-holdout_months:].reset_index(drop=True)
+
+    model = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+    )
+    model.fit(train_df)
+
+    future = model.make_future_dataframe(periods=holdout_months, freq="MS")
+    forecast = model.predict(future)
+    predicted = forecast[["ds", "yhat"]].tail(holdout_months).reset_index(drop=True)
+
+    actual = test_df["y"].values
+    predicted_values = predicted["yhat"].values
+
+    errors = actual - predicted_values
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
+
+    comparison = [
+        {
+            "month": test_df["ds"].iloc[i].strftime("%Y-%m"),
+            "actualUnits": int(actual[i]),
+            "predictedUnits": round(float(predicted_values[i])),
+            "errorAmount": round(float(errors[i]), 2),
+            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
+        }
+        for i in range(holdout_months)
+    ]
+
+    return {
+        "mae": round(mae, 2),
+        "rmse": round(rmse, 2),
+        "mape": round(mape, 2) if not np.isnan(mape) else None,
+        "comparison": comparison,
+    }
+
+
+def _forecast_one_category(category: str, category_df: pd.DataFrame, months_ahead: int) -> dict:
+    """
+    Fits/forecasts a single category. Runs inside a worker process via
+    ProcessPoolExecutor, so it MUST be a top-level function (picklable) --
+    it can't be a nested closure or lambda.
+    """
+    history = [
+        {"month": row.month, "actualUnits": int(row.total_units)}
+        for row in category_df.itertuples()
+    ]
+
+    if len(category_df) < MIN_MONTHS_REQUIRED:
+        return {
+            "category": category,
+            "history": history,
+            "forecast": run_simple_average_forecast(category_df, months_ahead),
+            "method": "simple_average",
+            "note": f"Not enough history for Prophet (need {MIN_MONTHS_REQUIRED}+ months, found {len(category_df)}) — used trailing average instead.",
+        }
+
+    try:
+        forecast_result = run_prophet_units_forecast(category_df, months_ahead)
+        forecast = [
+            {
+                "month": row.ds.strftime("%Y-%m"),
+                "predictedUnits": round(max(row.yhat, 0)),
+                "lowerBound": round(max(row.yhat_lower, 0)),
+                "upperBound": round(max(row.yhat_upper, 0)),
+            }
+            for row in forecast_result.itertuples()
+        ]
+        return {
+            "category": category,
+            "history": history,
+            "forecast": forecast,
+            "method": "prophet",
+        }
+    except Exception:
+        return {
+            "category": category,
+            "history": history,
+            "forecast": run_simple_average_forecast(category_df, months_ahead),
+            "method": "simple_average",
+            "note": "Prophet failed to converge on this category's data — used trailing average instead.",
+        }
+
+
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v2-with-fallback"}
+    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v3-parallel-categories"}
 
 
 @app.get("/forecast/sales")
@@ -254,6 +391,10 @@ def forecast_items_by_category(
     Forecasts expected ITEMS SOLD (units), broken down per category.
     Uses Prophet where there's enough clean history, and falls back to a
     simple trailing average for sparse/low-volume categories.
+
+    Category fits run in parallel worker processes instead of a sequential
+    loop -- fitting Prophet/Stan models one at a time for every category was
+    what caused the 20s timeouts on the Express side.
     """
     try:
         df = fetch_monthly_units_by_category()
@@ -263,51 +404,32 @@ def forecast_items_by_category(
     if df.empty:
         return {"error": "No sales data found."}
 
+    categories = df["category"].unique()
+    category_frames = {
+        c: df[df["category"] == c].reset_index(drop=True) for c in categories
+    }
+
     results = []
-
-    for category in df["category"].unique():
-        category_df = df[df["category"] == category].reset_index(drop=True)
-
-        history = [
-            {"month": row.month, "actualUnits": int(row.total_units)}
-            for row in category_df.itertuples()
-        ]
-
-        if len(category_df) < MIN_MONTHS_REQUIRED:
-            results.append({
-                "category": category,
-                "history": history,
-                "forecast": run_simple_average_forecast(category_df, months_ahead),
-                "method": "simple_average",
-                "note": f"Not enough history for Prophet (need {MIN_MONTHS_REQUIRED}+ months, found {len(category_df)}) — used trailing average instead.",
-            })
-            continue
-
-        try:
-            forecast_result = run_prophet_units_forecast(category_df, months_ahead)
-            forecast = [
-                {
-                    "month": row.ds.strftime("%Y-%m"),
-                    "predictedUnits": round(max(row.yhat, 0)),
-                    "lowerBound": round(max(row.yhat_lower, 0)),
-                    "upperBound": round(max(row.yhat_upper, 0)),
-                }
-                for row in forecast_result.itertuples()
-            ]
-            results.append({
-                "category": category,
-                "history": history,
-                "forecast": forecast,
-                "method": "prophet",
-            })
-        except Exception:
-            results.append({
-                "category": category,
-                "history": history,
-                "forecast": run_simple_average_forecast(category_df, months_ahead),
-                "method": "simple_average",
-                "note": "Prophet failed to converge on this category's data — used trailing average instead.",
-            })
+    # Capped at 4 workers: each Stan fit already uses its own threads, so
+    # going wider just causes CPU contention rather than real speedup.
+    max_workers = min(4, len(categories)) or 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_forecast_one_category, c, category_frames[c], months_ahead): c
+            for c in categories
+        }
+        for future in as_completed(futures):
+            category = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as e:
+                results.append({
+                    "category": category,
+                    "history": [],
+                    "forecast": [],
+                    "method": "error",
+                    "note": f"Forecast failed: {str(e)}",
+                })
 
     return {
         "monthsAhead": months_ahead,
@@ -321,6 +443,11 @@ def backtest_sales(
     category: Optional[str] = Query(None, description="Filter by category"),
     item_name: Optional[str] = Query(None, description="Filter by item name"),
 ):
+    """
+    General sales backtest -- revenue-based, whole-store (or filtered by
+    category/item_name if given). See /forecast/backtest-category for the
+    units-based, per-category version.
+    """
     try:
         df = fetch_monthly_sales(category=category, item_name=item_name)
     except Exception as e:
@@ -349,6 +476,51 @@ def backtest_sales(
             "rmse": result["rmse"],
             "mape": result["mape"],
         },
+        "verdict": interpret_accuracy(result["mae"], result["rmse"], result["mape"]),
+        "monthByMonth": result["comparison"],
+    }
+
+
+@app.get("/forecast/backtest-category")
+def backtest_category(
+    category: str = Query(..., description="Category to backtest (required)"),
+    holdout_months: int = Query(3, ge=1, le=12, description="How many recent months to hold out and test against"),
+):
+    """
+    Categorical/units backtest -- separate route from /forecast/backtest
+    since this operates on units sold for a single category, not revenue.
+    category is required because a units backtest pooled across all
+    categories together wouldn't be meaningful.
+    """
+    try:
+        df = fetch_monthly_units_by_category()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    category_df = df[df["category"] == category].reset_index(drop=True)
+
+    min_required = MIN_MONTHS_REQUIRED + holdout_months
+    if category_df.empty or len(category_df) < min_required:
+        return {
+            "error": f"Not enough historical data to backtest. Need at least {min_required} months "
+                     f"({MIN_MONTHS_REQUIRED} to train + {holdout_months} to hold out), found {len(category_df)}.",
+            "category": category,
+        }
+
+    try:
+        result = run_backtest_units(category_df, holdout_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest error: {str(e)}")
+
+    return {
+        "category": category,
+        "holdoutMonths": holdout_months,
+        "accuracy": {
+            "mae": result["mae"],
+            "rmse": result["rmse"],
+            "mape": result["mape"],
+        },
+        "verdict": interpret_accuracy(result["mae"], result["rmse"], result["mape"]),
         "monthByMonth": result["comparison"],
     }
 
