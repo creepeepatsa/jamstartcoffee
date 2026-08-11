@@ -13,6 +13,28 @@ const filterOptions = [
 
 const roleOptions = ['Admin', 'Staff', 'Manager'];
 
+const JAMSTART_DOMAIN = '@jamstart.com';
+
+const normalizeNamePart = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+const buildGeneratedCredentials = (firstName, lastName) => {
+  const normalizedFirstName = normalizeNamePart(firstName);
+  const normalizedLastName = normalizeNamePart(lastName);
+
+  if (!normalizedFirstName || !normalizedLastName) {
+    return { email: '', password: '' };
+  }
+
+  return {
+    email: `${normalizedFirstName[0]}${normalizedLastName}${JAMSTART_DOMAIN}`,
+    password: `${normalizedFirstName[0]}${normalizedLastName}`,
+  };
+};
+
 const emptyUserForm = {
   first_name: '',
   middle_name: '',
@@ -161,10 +183,26 @@ export default function Users() {
   };
 
   const handleInputChange = (field) => (event) => {
-    setFormData((current) => ({
-      ...current,
-      [field]: event.target.value,
-    }));
+    const value = event.target.value;
+
+    setFormData((current) => {
+      const nextState = {
+        ...current,
+        [field]: value,
+      };
+
+      if (mode === 'create' && (field === 'first_name' || field === 'last_name')) {
+        const generated = buildGeneratedCredentials(
+          field === 'first_name' ? value : nextState.first_name,
+          field === 'last_name' ? value : nextState.last_name
+        );
+
+        nextState.email = generated.email;
+        nextState.password = generated.password;
+      }
+
+      return nextState;
+    });
   };
 
   const refreshUsers = async () => {
@@ -195,6 +233,9 @@ export default function Users() {
       return;
     }
 
+    const generatedCredentials =
+      mode === 'create' ? buildGeneratedCredentials(formData.first_name, formData.last_name) : null;
+
     setSaving(true);
     setError('');
     setSuccess('');
@@ -206,8 +247,8 @@ export default function Users() {
           middle_name: formData.middle_name.trim() || null,
           last_name: formData.last_name.trim(),
           suffix: formData.suffix.trim() || null,
-          email: formData.email.trim(),
-          password: formData.password,
+          email: generatedCredentials?.email || formData.email.trim(),
+          password: generatedCredentials?.password || formData.password,
         });
         setSuccess('User created successfully.');
       } else {
@@ -535,19 +576,31 @@ export default function Users() {
                     type="email"
                     value={formData.email}
                     onChange={handleInputChange('email')}
-                    className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm text-emerald-950 outline-none transition placeholder:text-emerald-900/35 focus:border-lime-700/25"
+                    readOnly={mode === 'create'}
+                    className={`rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm text-emerald-950 outline-none transition placeholder:text-emerald-900/35 focus:border-lime-700/25 ${
+                      mode === 'create' ? 'bg-emerald-50/70' : ''
+                    }`}
                   />
+                  {mode === 'create' && (
+                    <span className="text-xs text-emerald-900/45">
+                      Auto-generated from the first initial and last name.
+                    </span>
+                  )}
                 </label>
 
                 {mode === 'create' ? (
                   <label className="grid gap-2 sm:col-span-2">
                     <span className="text-xs uppercase tracking-[0.28em] text-emerald-900/45">Password</span>
                     <input
-                      type="password"
+                      type="text"
                       value={formData.password}
                       onChange={handleInputChange('password')}
-                      className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm text-emerald-950 outline-none transition placeholder:text-emerald-900/35 focus:border-lime-700/25"
+                      readOnly
+                      className="rounded-2xl border border-emerald-900/10 bg-emerald-50/70 px-4 py-3 font-mono text-sm text-emerald-950 outline-none transition placeholder:text-emerald-900/35 focus:border-lime-700/25"
                     />
+                    <span className="text-xs text-emerald-900/45">
+                      Auto-generated from the first initial and last name.
+                    </span>
                   </label>
                 ) : (
                   <label className="grid gap-2 sm:col-span-2">

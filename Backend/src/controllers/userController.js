@@ -1,4 +1,5 @@
 import prisma from '../lib/prisma.js';
+import { queueActivity } from '../lib/activityLog.js';
 
 const publicUserFields = {
   id: true,
@@ -114,6 +115,25 @@ export const updateUser = async (req, res) => {
       select: publicUserFields,
     });
 
+    const changedFields = [
+      ['first_name', first_name],
+      ['middle_name', middle_name],
+      ['last_name', last_name],
+      ['suffix', suffix],
+      ['email', email],
+      ['role', role],
+    ]
+      .filter(([field, value]) => value !== undefined && value !== existing[field])
+      .map(([field]) => field);
+
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action:
+        changedFields.length > 0
+          ? `Updated user: ${existing.email} (${changedFields.join(', ')})`
+          : `Updated user: ${existing.email}`,
+    });
+
     res.json({ message: 'User updated', user });
   } catch (error) {
     console.error('Update user error:', error);
@@ -146,11 +166,9 @@ export const archiveUser = async (req, res) => {
       select: publicUserFields,
     });
 
-    await prisma.log.create({
-      data: {
-        name: req.user.email,
-        action: `Archived user: ${existing.email}`,
-      },
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: `Archived user: ${existing.email}`,
     });
 
     res.json({ message: 'User archived', user });
@@ -178,11 +196,9 @@ export const restoreUser = async (req, res) => {
       select: publicUserFields,
     });
 
-    await prisma.log.create({
-      data: {
-        name: req.user.email,
-        action: `Restored user: ${existing.email}`,
-      },
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: `Restored user: ${existing.email}`,
     });
 
     res.json({ message: 'User restored', user });

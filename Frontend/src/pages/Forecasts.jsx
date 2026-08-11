@@ -22,9 +22,10 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
 const MONTH_OPTIONS = [3, 6, 12];
+const HISTORY_WINDOW_OPTIONS = [3, 6, 12, 24];
 
 const peso = (n) =>
   `₱${Number(n ?? 0).toLocaleString('en-PH', { maximumFractionDigits: 0 })}`;
@@ -59,6 +60,7 @@ function RevenueTooltip({ active, payload, label }) {
 export default function Forecasts() {
   const [monthsAhead, setMonthsAhead] = useState(3);
   const [category, setCategory] = useState('');
+  const [historyWindow, setHistoryWindow] = useState(6);
 
   const [revenue, setRevenue] = useState(null);
   const [revenueLoading, setRevenueLoading] = useState(true);
@@ -116,7 +118,8 @@ export default function Forecasts() {
 
   const revenueChartData = useMemo(() => {
     if (!revenue) return [];
-    const history = (revenue.history ?? []).map((h) => ({
+    const recentHistory = (revenue.history ?? []).slice(-historyWindow);
+    const history = recentHistory.map((h) => ({
       month: h.month,
       actualRevenue: h.actualRevenue,
       predictedRevenue: null,
@@ -230,13 +233,27 @@ export default function Forecasts() {
                 </h2>
               </div>
             </div>
-            <button
-              onClick={loadRevenue}
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-emerald-900/10 text-emerald-900/60 hover:bg-emerald-50"
-              title="Refresh"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              <select
+                value={historyWindow}
+                onChange={(e) => setHistoryWindow(Number(e.target.value))}
+                className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2 text-xs font-medium text-emerald-950 outline-none focus:ring-2 focus:ring-emerald-900/20"
+                title="Past months to show"
+              >
+                {HISTORY_WINDOW_OPTIONS.map((m) => (
+                  <option key={m} value={m}>
+                    Past {m}mo
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={loadRevenue}
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-emerald-900/10 text-emerald-900/60 hover:bg-emerald-50"
+                title="Refresh"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           <div className="mt-6 h-80 rounded-3xl border border-emerald-900/10 bg-[#fbfaf7] p-3 sm:p-4">

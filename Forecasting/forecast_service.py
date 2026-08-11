@@ -1,6 +1,8 @@
+import itertools
 import logging
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -10,10 +12,14 @@ import psycopg2
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from prophet import Prophet
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 # Silence Prophet/cmdstanpy's verbose "Log joint probability" console spam
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 logging.getLogger("prophet").setLevel(logging.WARNING)
+# statsmodels throws a lot of convergence/frequency warnings during grid search -- expected, safe to ignore
+warnings.filterwarnings("ignore")
 
 load_dotenv()
 
@@ -23,7 +29,9 @@ if not DATABASE_URL:
 
 app = FastAPI(title="Jamstart Coffee - Sales Forecasting Service")
 
-MIN_MONTHS_REQUIRED = 6  # Prophet needs a reasonable history to be useful
+MIN_MONTHS_REQUIRED = 6  # Prophet/ARIMA/SARIMA need a reasonable history to be useful
+CATEGORY_FORECAST_MAX_WORKERS = max(1, min(8, (os.cpu_count() or 1)))
+CATEGORY_MIN_MONTHS_FOR_PROPHET = 12
 
 
 def get_connection():
@@ -85,8 +93,9 @@ def run_prophet_forecast(df: pd.DataFrame, months_ahead: int) -> pd.DataFrame:
         yearly_seasonality=True,
         weekly_seasonality=False,
         daily_seasonality=False,
+        uncertainty_samples=200,
     )
-    model.fit(prophet_df)
+    model.fit(prophet_df, iter=300)
 
     future = model.make_future_dataframe(periods=months_ahead, freq="MS")
     forecast = model.predict(future)
@@ -103,8 +112,9 @@ def run_prophet_units_forecast(category_df: pd.DataFrame, months_ahead: int) -> 
         yearly_seasonality=True,
         weekly_seasonality=False,
         daily_seasonality=False,
+        uncertainty_samples=100,
     )
-    model.fit(prophet_df)
+    model.fit(prophet_df, iter=200)
 
     future = model.make_future_dataframe(periods=months_ahead, freq="MS")
     forecast = model.predict(future)
@@ -145,8 +155,8 @@ def interpret_accuracy(mae: float, rmse: float, mape: Optional[float]) -> dict:
 
     Ideal ranges:
       - MAPE: <=10% excellent, 10-20% acceptable, >20% poor
-      - MAE:  <=5000 good, otherwise high (revenue scale — see note below
-              if reusing this for a units-based backtest)
+      - MAE:  <=5000 good, otherwise high (revenue scale -- if reused for a
+              units-based backtest, consider a relative threshold instead)
       - RMSE: should stay close to MAE; a big gap (ratio > 1.5) means
               a few months had much bigger misses than the rest (outliers)
     """
@@ -174,11 +184,296 @@ def interpret_accuracy(mae: float, rmse: float, mape: Optional[float]) -> dict:
     }
 
 
+def compare_models(results_by_model: dict) -> dict:
+    """
+    Picks the best-performing model out of however many are passed in
+    (e.g. {"prophet": {...}, "arima": {...}, "sarima": {...}}).
+
+    Primary tiebreaker is MAPE (lower is better) since it's scale-independent
+    and the most directly interpretable ("on average, X% off"). Falls back to
+    MAE, then RMSE, if MAPE is missing or tied across the leading candidates.
+    """
+    def sort_key(item):
+        name, result = item
+        mape = result["mape"] if result["mape"] is not None else float("inf")
+        mae = result["mae"]
+        rmse = result["rmse"]
+        return (mape, mae, rmse)
+
+    ranked = sorted(results_by_model.items(), key=sort_key)
+    winner_name, winner_result = ranked[0]
+
+    if winner_result["mape"] is not None:
+        reason = "lowest MAPE"
+    elif winner_result["mae"] is not None:
+        reason = "lowest MAE (MAPE unavailable)"
+    else:
+        reason = "lowest RMSE (MAPE and MAE unavailable)"
+
+    return {
+        "winner": winner_name,
+        "reason": reason,
+        "ranking": [name for name, _ in ranked],
+    }
+
+
+def find_best_arima_order(
+    series: pd.Series,
+    p_range=range(0, 3),
+    d_range=range(0, 2),
+    q_range=range(0, 3),
+):
+    """
+    Small grid search over (p, d, q) combinations, scored by AIC (lower is
+    better -- balances fit quality against model complexity).
+    """
+    best_aic = np.inf
+    best_order = (1, 1, 1)  # sane fallback if every combination fails to converge
+
+    for p, d, q in itertools.product(p_range, d_range, q_range):
+        try:
+            fitted = ARIMA(series, order=(p, d, q)).fit()
+            if fitted.aic < best_aic:
+                best_aic = fitted.aic
+                best_order = (p, d, q)
+        except Exception:
+            continue  # some combos won't converge on short series -- skip them
+
+    return best_order
+
+
+def find_best_sarima_order(
+    series: pd.Series,
+    p_range=range(0, 2),
+    d_range=range(0, 2),
+    q_range=range(0, 2),
+    seasonal_p_range=range(0, 2),
+    seasonal_d_range=range(0, 2),
+    seasonal_q_range=range(0, 2),
+    seasonal_period=12,
+):
+    """
+    Grid search over both non-seasonal (p,d,q) and seasonal (P,D,Q,s) terms,
+    scored by AIC. Kept narrower than the plain ARIMA search (0-1 instead of
+    0-2 per term) since the seasonal search space grows fast -- 2x2x2 seasonal
+    x 2x2x2 non-seasonal is already 64 fits per call, and Prophet-scale
+    data (~40 monthly points) doesn't need a wider search to find a good fit.
+    """
+    best_aic = np.inf
+    best_order = (1, 1, 1)
+    best_seasonal_order = (1, 1, 1, seasonal_period)
+
+    for p, d, q in itertools.product(p_range, d_range, q_range):
+        for sp, sd, sq in itertools.product(seasonal_p_range, seasonal_d_range, seasonal_q_range):
+            try:
+                fitted = SARIMAX(
+                    series,
+                    order=(p, d, q),
+                    seasonal_order=(sp, sd, sq, seasonal_period),
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                ).fit(disp=False)
+                if fitted.aic < best_aic:
+                    best_aic = fitted.aic
+                    best_order = (p, d, q)
+                    best_seasonal_order = (sp, sd, sq, seasonal_period)
+            except Exception:
+                continue
+
+    return best_order, best_seasonal_order
+
+
+def run_backtest_arima(df: pd.DataFrame, holdout_months: int) -> dict:
+    """ARIMA equivalent of run_backtest() -- same train/holdout split on revenue."""
+    series_df = df.copy()
+    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
+    series_df = series_df.set_index("ds")["total_revenue"]
+    series_df.index.freq = "MS"
+
+    train_series = series_df.iloc[:-holdout_months]
+    test_series = series_df.iloc[-holdout_months:]
+
+    order = find_best_arima_order(train_series)
+    model = ARIMA(train_series, order=order).fit()
+    predicted_values = model.forecast(steps=holdout_months).values
+
+    actual = test_series.values
+    errors = actual - predicted_values
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
+
+    comparison = [
+        {
+            "month": test_series.index[i].strftime("%Y-%m"),
+            "actualRevenue": round(float(actual[i]), 2),
+            "predictedRevenue": round(float(predicted_values[i]), 2),
+            "errorAmount": round(float(errors[i]), 2),
+            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
+        }
+        for i in range(holdout_months)
+    ]
+
+    return {
+        "order": order,
+        "mae": round(mae, 2),
+        "rmse": round(rmse, 2),
+        "mape": round(mape, 2) if not np.isnan(mape) else None,
+        "comparison": comparison,
+    }
+
+
+def run_backtest_units_arima(category_df: pd.DataFrame, holdout_months: int) -> dict:
+    """ARIMA equivalent of run_backtest_units() -- same idea, on units instead of revenue."""
+    series_df = category_df.copy()
+    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
+    series_df = series_df.set_index("ds")["total_units"]
+    series_df.index.freq = "MS"
+
+    train_series = series_df.iloc[:-holdout_months]
+    test_series = series_df.iloc[-holdout_months:]
+
+    order = find_best_arima_order(train_series)
+    model = ARIMA(train_series, order=order).fit()
+    predicted_values = model.forecast(steps=holdout_months).values
+
+    actual = test_series.values
+    errors = actual - predicted_values
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
+
+    comparison = [
+        {
+            "month": test_series.index[i].strftime("%Y-%m"),
+            "actualUnits": int(actual[i]),
+            "predictedUnits": round(float(predicted_values[i])),
+            "errorAmount": round(float(errors[i]), 2),
+            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
+        }
+        for i in range(holdout_months)
+    ]
+
+    return {
+        "order": order,
+        "mae": round(mae, 2),
+        "rmse": round(rmse, 2),
+        "mape": round(mape, 2) if not np.isnan(mape) else None,
+        "comparison": comparison,
+    }
+
+
+def run_backtest_sarima(df: pd.DataFrame, holdout_months: int) -> dict:
+    """
+    SARIMA equivalent of run_backtest() -- adds seasonal (P,D,Q,12) terms on
+    top of ARIMA's (p,d,q), which should help on data like this with clear
+    yearly seasonality (holiday peaks, Jan-Mar dips).
+    """
+    series_df = df.copy()
+    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
+    series_df = series_df.set_index("ds")["total_revenue"]
+    series_df.index.freq = "MS"
+
+    train_series = series_df.iloc[:-holdout_months]
+    test_series = series_df.iloc[-holdout_months:]
+
+    order, seasonal_order = find_best_sarima_order(train_series)
+    model = SARIMAX(
+        train_series,
+        order=order,
+        seasonal_order=seasonal_order,
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    ).fit(disp=False)
+    predicted_values = model.forecast(steps=holdout_months).values
+
+    actual = test_series.values
+    errors = actual - predicted_values
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
+
+    comparison = [
+        {
+            "month": test_series.index[i].strftime("%Y-%m"),
+            "actualRevenue": round(float(actual[i]), 2),
+            "predictedRevenue": round(float(predicted_values[i]), 2),
+            "errorAmount": round(float(errors[i]), 2),
+            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
+        }
+        for i in range(holdout_months)
+    ]
+
+    return {
+        "order": order,
+        "seasonalOrder": seasonal_order,
+        "mae": round(mae, 2),
+        "rmse": round(rmse, 2),
+        "mape": round(mape, 2) if not np.isnan(mape) else None,
+        "comparison": comparison,
+    }
+
+
+def run_backtest_units_sarima(category_df: pd.DataFrame, holdout_months: int) -> dict:
+    """SARIMA equivalent of run_backtest_units() -- units instead of revenue."""
+    series_df = category_df.copy()
+    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
+    series_df = series_df.set_index("ds")["total_units"]
+    series_df.index.freq = "MS"
+
+    train_series = series_df.iloc[:-holdout_months]
+    test_series = series_df.iloc[-holdout_months:]
+
+    order, seasonal_order = find_best_sarima_order(train_series)
+    model = SARIMAX(
+        train_series,
+        order=order,
+        seasonal_order=seasonal_order,
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    ).fit(disp=False)
+    predicted_values = model.forecast(steps=holdout_months).values
+
+    actual = test_series.values
+    errors = actual - predicted_values
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
+
+    comparison = [
+        {
+            "month": test_series.index[i].strftime("%Y-%m"),
+            "actualUnits": int(actual[i]),
+            "predictedUnits": round(float(predicted_values[i])),
+            "errorAmount": round(float(errors[i]), 2),
+            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
+        }
+        for i in range(holdout_months)
+    ]
+
+    return {
+        "order": order,
+        "seasonalOrder": seasonal_order,
+        "mae": round(mae, 2),
+        "rmse": round(rmse, 2),
+        "mape": round(mape, 2) if not np.isnan(mape) else None,
+        "comparison": comparison,
+    }
+
+
 def run_backtest(df: pd.DataFrame, holdout_months: int) -> dict:
     """
     Trains Prophet on all data EXCEPT the last `holdout_months`,
     predicts those held-out months, then compares predictions to
-    what actually happened. This tells us how much to trust the model.
+    what actually happened.
     """
     prophet_df = df.rename(columns={"month": "ds", "total_revenue": "y"})[["ds", "y"]]
     prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
@@ -227,13 +522,7 @@ def run_backtest(df: pd.DataFrame, holdout_months: int) -> dict:
 
 
 def run_backtest_units(category_df: pd.DataFrame, holdout_months: int) -> dict:
-    """
-    Same idea as run_backtest(), but for units sold within a single
-    category instead of overall revenue. Used by the categorical
-    backtest endpoint, kept separate from run_backtest() since the
-    two operate on different columns (units vs revenue) and different
-    source dataframes (per-category vs whole-store).
-    """
+    """Same idea as run_backtest(), but for units sold within a single category."""
     prophet_df = category_df.rename(columns={"month": "ds", "total_units": "y"})[["ds", "y"]]
     prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
 
@@ -291,13 +580,13 @@ def _forecast_one_category(category: str, category_df: pd.DataFrame, months_ahea
         for row in category_df.itertuples()
     ]
 
-    if len(category_df) < MIN_MONTHS_REQUIRED:
+    if len(category_df) < CATEGORY_MIN_MONTHS_FOR_PROPHET:
         return {
             "category": category,
             "history": history,
             "forecast": run_simple_average_forecast(category_df, months_ahead),
             "method": "simple_average",
-            "note": f"Not enough history for Prophet (need {MIN_MONTHS_REQUIRED}+ months, found {len(category_df)}) — used trailing average instead.",
+            "note": f"Not enough history for Prophet (need {CATEGORY_MIN_MONTHS_FOR_PROPHET}+ months, found {len(category_df)}) — used trailing average instead.",
         }
 
     try:
@@ -329,7 +618,7 @@ def _forecast_one_category(category: str, category_df: pd.DataFrame, months_ahea
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v3-parallel-categories"}
+    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v5-prophet-arima-sarima"}
 
 
 @app.get("/forecast/sales")
@@ -391,10 +680,6 @@ def forecast_items_by_category(
     Forecasts expected ITEMS SOLD (units), broken down per category.
     Uses Prophet where there's enough clean history, and falls back to a
     simple trailing average for sparse/low-volume categories.
-
-    Category fits run in parallel worker processes instead of a sequential
-    loop -- fitting Prophet/Stan models one at a time for every category was
-    what caused the 20s timeouts on the Express side.
     """
     try:
         df = fetch_monthly_units_by_category()
@@ -410,10 +695,8 @@ def forecast_items_by_category(
     }
 
     results = []
-    # Capped at 4 workers: each Stan fit already uses its own threads, so
-    # going wider just causes CPU contention rather than real speedup.
-    max_workers = min(4, len(categories)) or 1
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    max_workers = min(CATEGORY_FORECAST_MAX_WORKERS, len(categories)) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_forecast_one_category, c, category_frames[c], months_ahead): c
             for c in categories
@@ -431,6 +714,8 @@ def forecast_items_by_category(
                     "note": f"Forecast failed: {str(e)}",
                 })
 
+    results.sort(key=lambda row: row["category"])
+
     return {
         "monthsAhead": months_ahead,
         "categories": results,
@@ -445,8 +730,8 @@ def backtest_sales(
 ):
     """
     General sales backtest -- revenue-based, whole-store (or filtered by
-    category/item_name if given). See /forecast/backtest-category for the
-    units-based, per-category version.
+    category/item_name if given). Runs Prophet, ARIMA, and SARIMA, and
+    returns a bestModel verdict comparing all three on MAPE/MAE/RMSE.
     """
     try:
         df = fetch_monthly_sales(category=category, item_name=item_name)
@@ -463,21 +748,61 @@ def backtest_sales(
         }
 
     try:
-        result = run_backtest(df, holdout_months)
+        prophet_result = run_backtest(df, holdout_months)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backtest error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prophet backtest error: {str(e)}")
+
+    try:
+        arima_result = run_backtest_arima(df, holdout_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ARIMA backtest error: {str(e)}")
+
+    try:
+        sarima_result = run_backtest_sarima(df, holdout_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SARIMA backtest error: {str(e)}")
+
+    best = compare_models({
+        "prophet": prophet_result,
+        "arima": arima_result,
+        "sarima": sarima_result,
+    })
 
     return {
         "category": category,
         "item_name": item_name,
         "holdoutMonths": holdout_months,
-        "accuracy": {
-            "mae": result["mae"],
-            "rmse": result["rmse"],
-            "mape": result["mape"],
+        "prophet": {
+            "accuracy": {
+                "mae": prophet_result["mae"],
+                "rmse": prophet_result["rmse"],
+                "mape": prophet_result["mape"],
+            },
+            "verdict": interpret_accuracy(prophet_result["mae"], prophet_result["rmse"], prophet_result["mape"]),
+            "monthByMonth": prophet_result["comparison"],
         },
-        "verdict": interpret_accuracy(result["mae"], result["rmse"], result["mape"]),
-        "monthByMonth": result["comparison"],
+        "arima": {
+            "order": arima_result["order"],
+            "accuracy": {
+                "mae": arima_result["mae"],
+                "rmse": arima_result["rmse"],
+                "mape": arima_result["mape"],
+            },
+            "verdict": interpret_accuracy(arima_result["mae"], arima_result["rmse"], arima_result["mape"]),
+            "monthByMonth": arima_result["comparison"],
+        },
+        "sarima": {
+            "order": sarima_result["order"],
+            "seasonalOrder": sarima_result["seasonalOrder"],
+            "accuracy": {
+                "mae": sarima_result["mae"],
+                "rmse": sarima_result["rmse"],
+                "mape": sarima_result["mape"],
+            },
+            "verdict": interpret_accuracy(sarima_result["mae"], sarima_result["rmse"], sarima_result["mape"]),
+            "monthByMonth": sarima_result["comparison"],
+        },
+        "bestModel": best,
     }
 
 
@@ -489,8 +814,7 @@ def backtest_category(
     """
     Categorical/units backtest -- separate route from /forecast/backtest
     since this operates on units sold for a single category, not revenue.
-    category is required because a units backtest pooled across all
-    categories together wouldn't be meaningful.
+    Runs Prophet, ARIMA, and SARIMA, and returns a bestModel verdict.
     """
     try:
         df = fetch_monthly_units_by_category()
@@ -508,20 +832,60 @@ def backtest_category(
         }
 
     try:
-        result = run_backtest_units(category_df, holdout_months)
+        prophet_result = run_backtest_units(category_df, holdout_months)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Backtest error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prophet backtest error: {str(e)}")
+
+    try:
+        arima_result = run_backtest_units_arima(category_df, holdout_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ARIMA backtest error: {str(e)}")
+
+    try:
+        sarima_result = run_backtest_units_sarima(category_df, holdout_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SARIMA backtest error: {str(e)}")
+
+    best = compare_models({
+        "prophet": prophet_result,
+        "arima": arima_result,
+        "sarima": sarima_result,
+    })
 
     return {
         "category": category,
         "holdoutMonths": holdout_months,
-        "accuracy": {
-            "mae": result["mae"],
-            "rmse": result["rmse"],
-            "mape": result["mape"],
+        "prophet": {
+            "accuracy": {
+                "mae": prophet_result["mae"],
+                "rmse": prophet_result["rmse"],
+                "mape": prophet_result["mape"],
+            },
+            "verdict": interpret_accuracy(prophet_result["mae"], prophet_result["rmse"], prophet_result["mape"]),
+            "monthByMonth": prophet_result["comparison"],
         },
-        "verdict": interpret_accuracy(result["mae"], result["rmse"], result["mape"]),
-        "monthByMonth": result["comparison"],
+        "arima": {
+            "order": arima_result["order"],
+            "accuracy": {
+                "mae": arima_result["mae"],
+                "rmse": arima_result["rmse"],
+                "mape": arima_result["mape"],
+            },
+            "verdict": interpret_accuracy(arima_result["mae"], arima_result["rmse"], arima_result["mape"]),
+            "monthByMonth": arima_result["comparison"],
+        },
+        "sarima": {
+            "order": sarima_result["order"],
+            "seasonalOrder": sarima_result["seasonalOrder"],
+            "accuracy": {
+                "mae": sarima_result["mae"],
+                "rmse": sarima_result["rmse"],
+                "mape": sarima_result["mape"],
+            },
+            "verdict": interpret_accuracy(sarima_result["mae"], sarima_result["rmse"], sarima_result["mape"]),
+            "monthByMonth": sarima_result["comparison"],
+        },
+        "bestModel": best,
     }
 
 

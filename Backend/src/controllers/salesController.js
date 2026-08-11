@@ -2,6 +2,7 @@ import { parse } from 'csv-parse/sync';
 import ExcelJS from 'exceljs';
 import crypto from 'crypto';
 import prisma from '../lib/prisma.js';
+import { queueActivity } from '../lib/activityLog.js';
 
 const parseMonthRange = (monthValue) => {
   if (!monthValue) return null;
@@ -224,11 +225,9 @@ export const importSales = async (req, res) => {
       },
     });
 
-    await prisma.log.create({
-      data: {
-        name: req.user?.email || 'unknown',
-        action: `Imported ${validRows.length}/${rows.length} sales rows from ${req.file.originalname}`,
-      },
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: `Imported ${validRows.length}/${rows.length} sales rows from ${req.file.originalname}`,
     });
 
     res.status(200).json({
@@ -521,11 +520,9 @@ export const exportSales = async (req, res) => {
       res.send(header + csvRows);
     }
 
-    await prisma.log.create({
-      data: {
-        name: req.user?.email || 'unknown',
-        action: `Exported ${reportType} report (${rows.length} rows, ${format})`,
-      },
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: `Exported ${reportType} report (${rows.length} rows, ${format})`,
     });
   } catch (error) {
     console.error('Export error:', error);

@@ -1,24 +1,29 @@
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
+  Activity,
   LayoutDashboard,
   ChevronLeft,
   ChevronRight,
   ClipboardList,
   LineChart,
-  Settings2,
   UserRound,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import logo from '../assets/logo_green.png';
 
-const navItems = [
+const adminNavItems = [
   { label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
+  { label: 'Activity', icon: Activity, path: '/activity' },
   { label: 'Sales', icon: ClipboardList, path: '/sales' },
   { label: 'Forecasting', icon: LineChart, path: '/forecasts' },
   { label: 'Users', icon: UserRound, path: '/users' },
-  { label: 'Settings', icon: Settings2, path: '/settings' },
+];
+
+const userNavItems = [
+  { label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
+  { label: 'Sales', icon: ClipboardList, path: '/sales' },
 ];
 
 export default function Sidebar() {
@@ -26,6 +31,8 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuth();
+  const isAdmin = user?.role === 'Admin';
+  const navItems = isAdmin ? adminNavItems : userNavItems;
 
   const userName = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.name || user?.fullName || 'Cafe Operator';
   const userEmail = user?.email || 'active-session@jamstart.coffee';

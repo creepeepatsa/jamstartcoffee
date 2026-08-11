@@ -214,6 +214,8 @@ export async function getSalesTable(req, res) {
 // ---------------------------------------------------------------------------
 const FORECAST_SERVICE_URL =
   process.env.FORECAST_SERVICE_URL || "http://localhost:8000";
+const SALES_FORECAST_TIMEOUT_MS = Number(process.env.SALES_FORECAST_TIMEOUT_MS || 60000);
+const CATEGORY_FORECAST_TIMEOUT_MS = Number(process.env.CATEGORY_FORECAST_TIMEOUT_MS || 120000);
 
 export async function getSalesForecast(req, res) {
   try {
@@ -232,7 +234,7 @@ export async function getSalesForecast(req, res) {
         category: category || undefined,
         item_name: item || undefined,
       },
-      timeout: 15000, // Prophet fitting can take a couple seconds
+      timeout: SALES_FORECAST_TIMEOUT_MS,
     });
 
     if (data.error) {
@@ -245,6 +247,13 @@ export async function getSalesForecast(req, res) {
       console.error("getSalesForecast error: forecasting service is not running");
       return res.status(503).json({
         error: "Forecasting service is unavailable. Make sure the Python service is running.",
+      });
+    }
+
+    if (err.code === "ECONNABORTED") {
+      console.error("getSalesForecast error: forecasting service timed out");
+      return res.status(504).json({
+        error: "Forecasting service timed out while generating sales forecast.",
       });
     }
 
@@ -273,7 +282,7 @@ export async function getItemsForecastByCategory(req, res) {
 
     const { data } = await axios.get(`${FORECAST_SERVICE_URL}/forecast/items-by-category`, {
       params: { months_ahead: parsedMonthsAhead },
-      timeout: 20000, // multiple category models take longer than a single forecast
+      timeout: CATEGORY_FORECAST_TIMEOUT_MS,
     });
 
     if (data.error) {
@@ -286,6 +295,13 @@ export async function getItemsForecastByCategory(req, res) {
       console.error("getItemsForecastByCategory error: forecasting service is not running");
       return res.status(503).json({
         error: "Forecasting service is unavailable. Make sure the Python service is running.",
+      });
+    }
+
+    if (err.code === "ECONNABORTED") {
+      console.error("getItemsForecastByCategory error: forecasting service timed out");
+      return res.status(504).json({
+        error: "Forecasting service timed out while generating category forecast.",
       });
     }
 

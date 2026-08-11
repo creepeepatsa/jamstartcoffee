@@ -1,11 +1,34 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import prisma from '../lib/prisma.js';
+import { queueActivity } from '../lib/activityLog.js';
 
 
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const TOKEN_EXPIRY = '24h';
+
+const JAMSTART_DOMAIN = '@jamstart.com';
+
+const normalizeNamePart = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+const buildGeneratedCredentials = (firstName, lastName) => {
+  const normalizedFirstName = normalizeNamePart(firstName);
+  const normalizedLastName = normalizeNamePart(lastName);
+
+  if (!normalizedFirstName || !normalizedLastName) {
+    return { email: '', password: '' };
+  }
+
+  return {
+    email: `${normalizedFirstName[0]}${normalizedLastName}${JAMSTART_DOMAIN}`,
+    password: `${normalizedFirstName[0]}${normalizedLastName}`,
+  };
+};
 
 // ─────────────────────────────────────────────
 // REGISTER
@@ -14,20 +37,28 @@ export const register = async (req, res) => {
   try {
     const { first_name, middle_name, last_name, suffix, email, password } = req.body;
  
-    if (!first_name || !last_name || !email || !password) {
-      return res.status(400).json({ error: 'First name, last name, email, and password are required' });
+    if (!first_name || !last_name) {
+      return res.status(400).json({ error: 'First name and last name are required' });
     }
 
-    if (password.length < 6) {
+    const generatedCredentials = buildGeneratedCredentials(first_name, last_name);
+    const finalEmail = (email || generatedCredentials.email).trim();
+    const finalPassword = password || generatedCredentials.password;
+
+    if (!finalEmail || !finalPassword) {
+      return res.status(400).json({ error: 'Could not generate credentials from the provided name' });
+    }
+
+    if (finalPassword.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const existingUser = await prisma.user.findUnique({ where: { email: finalEmail } });
     if (existingUser) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(finalPassword, 10);
 
     const user = await prisma.user.   create({
       data: {
@@ -35,9 +66,14 @@ export const register = async (req, res) => {
         middle_name: middle_name || null,
         last_name,
         suffix: suffix || null,
-        email,
+        email: finalEmail,
         password: hashedPassword,
       },
+    });
+
+    queueActivity(res, {
+      actor: user.email,
+      action: 'Registered user',
     });
 
     const token = jwt.sign(
@@ -92,6 +128,11 @@ export const login = async (req, res) => {
       { expiresIn: TOKEN_EXPIRY }
     );
 
+    queueActivity(res, {
+      actor: user.email,
+      action: 'Logged in',
+    });
+
     res.json({
       message: 'Login successful',
       token,
@@ -120,11 +161,10 @@ export const login = async (req, res) => {
 // mainly so you have a consistent place to log the action.
 export const logout = async (req, res) => {
   try {
-    if (req.user?.email) {
-      await prisma.log.create({
-        data: { name: req.user.email, action: 'Logged out' },
-      });
-    }
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: 'Logged out',
+    });
     res.json({ message: 'Logout successful' });
   } catch (error) {
     console.error('Logout error:', error);

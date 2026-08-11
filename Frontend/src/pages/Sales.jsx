@@ -3,6 +3,7 @@ import { BarChart3, Calendar, ClipboardList, Download, Package, RefreshCcw, Uplo
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import api from '../api/axios';
+import { useAuth } from '../context/AuthContext';
 import Table from '../components/Table';
 import Dropdown from '../components/Dropdown';
 
@@ -24,6 +25,8 @@ const emptyImportSummary = null;
 export default function Sales() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'Admin';
   const [sales, setSales] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -268,14 +271,16 @@ export default function Sales() {
           <button
             type="button"
             onClick={() => navigate('/reports')}
+              disabled={!isAdmin}
             className={`inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition ${
-              location.pathname === '/reports'
+              isAdmin && location.pathname === '/reports'
                 ? 'border-blue-600 text-blue-600'
                 : 'border-transparent text-emerald-900/70 hover:text-emerald-950'
             }`}
+              aria-hidden={!isAdmin}
           >
-            <BarChart3 className="h-4 w-4" />
-            Reports
+              <BarChart3 className="h-4 w-4" />
+              Reports
           </button>
         </div>
       </div>
@@ -297,15 +302,17 @@ export default function Sales() {
               className="hidden"
               onChange={handleFileSelected}
             />
-            <button
-              type="button"
-              onClick={handleImportClick}
-              disabled={importing}
-              className="inline-flex items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm font-medium text-emerald-900/80 shadow-sm shadow-emerald-950/5 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Upload className="h-4 w-4" />
-              {importing ? 'Importing...' : 'Import'}
-            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={handleImportClick}
+                disabled={importing}
+                className="inline-flex items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm font-medium text-emerald-900/80 shadow-sm shadow-emerald-950/5 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Upload className="h-4 w-4" />
+                {importing ? 'Importing...' : 'Import'}
+              </button>
+            )}
 
             <button
               type="button"

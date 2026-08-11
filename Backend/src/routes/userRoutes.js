@@ -6,14 +6,16 @@ import {
   archiveUser,
   restoreUser,
 } from '../controllers/userController.js';
-import { verifyToken } from '../middleware/authMiddleware.js';
+import { verifyRole, verifyToken } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/', verifyToken, getUsers);
-router.get('/:id', verifyToken, getUserById);
-router.put('/:id', verifyToken, updateUser);
-router.put('/:id/archive', verifyToken, archiveUser);
-router.put('/:id/restore', verifyToken, restoreUser);
+router.use(verifyToken, verifyRole('Admin'));
+
+router.get('/', getUsers);
+router.get('/:id', getUserById);
+router.put('/:id', updateUser);
+router.put('/:id/archive', archiveUser);
+router.put('/:id/restore', restoreUser);
 
 export default router;
