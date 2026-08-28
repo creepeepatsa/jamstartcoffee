@@ -4,5 +4,7 @@ psycopg2-binary
 pandas
 prophet
 python-dotenv
-numpyx`
+numpy
+joblib
 statsmodels
+pmdarima==2.1.1
