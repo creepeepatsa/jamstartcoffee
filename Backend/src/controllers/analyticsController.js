@@ -216,6 +216,9 @@ const FORECAST_SERVICE_URL =
   process.env.FORECAST_SERVICE_URL || "http://localhost:8000";
 const SALES_FORECAST_TIMEOUT_MS = Number(process.env.SALES_FORECAST_TIMEOUT_MS || 60000);
 const CATEGORY_FORECAST_TIMEOUT_MS = Number(process.env.CATEGORY_FORECAST_TIMEOUT_MS || 120000);
+const PRETRAINED_FORECAST_TIMEOUT_MS = Number(
+  process.env.PRETRAINED_FORECAST_TIMEOUT_MS || 30000
+);
 
 export async function getSalesForecast(req, res) {
   try {
@@ -307,5 +310,64 @@ export async function getItemsForecastByCategory(req, res) {
 
     console.error("getItemsForecastByCategory error:", err.message);
     res.status(500).json({ error: "Failed to generate items-by-category forecast." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/analytics/forecast-pretrained/:key
+// Calls the Python (FastAPI) forecasting microservice's pre-trained model
+// route. key is "sarima" or "demand" -- matches PRETRAINED_MODEL_META in
+// forecast_service.py. Unlike getSalesForecast/getItemsForecastByCategory,
+// this doesn't fit a fresh model per request -- it serves predictions from
+// the client-supplied .pkl files, so it should respond much faster.
+// ---------------------------------------------------------------------------
+export async function getPretrainedForecast(req, res) {
+  try {
+    const { key } = req.params;
+    const { monthsAhead = 3 } = req.query;
+
+    const parsedMonthsAhead = parseInt(monthsAhead, 10);
+    if (isNaN(parsedMonthsAhead) || parsedMonthsAhead < 1 || parsedMonthsAhead > 24) {
+      return res
+        .status(400)
+        .json({ error: "monthsAhead must be a number between 1 and 24." });
+    }
+
+    const { data } = await axios.get(
+      `${FORECAST_SERVICE_URL}/forecast/pretrained/${key}`,
+      {
+        params: { months_ahead: parsedMonthsAhead },
+        timeout: PRETRAINED_FORECAST_TIMEOUT_MS,
+      }
+    );
+
+    if (data.error) {
+      return res.status(422).json({ error: data.error });
+    }
+
+    res.json(data);
+  } catch (err) {
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: `No pretrained model found for '${req.params.key}'.`,
+      });
+    }
+
+    if (err.code === "ECONNREFUSED") {
+      console.error("getPretrainedForecast error: forecasting service is not running");
+      return res.status(503).json({
+        error: "Forecasting service is unavailable. Make sure the Python service is running.",
+      });
+    }
+
+    if (err.code === "ECONNABORTED") {
+      console.error("getPretrainedForecast error: forecasting service timed out");
+      return res.status(504).json({
+        error: "Forecasting service timed out while generating pretrained forecast.",
+      });
+    }
+
+    console.error("getPretrainedForecast error:", err.message);
+    res.status(500).json({ error: "Failed to generate pretrained forecast." });
   }
 }

@@ -1,4 +1,4 @@
-// routes/analytics.routes.js — add the missing import and route
+// routes/analytics.routes.js
 
 import express from "express";
 import {
@@ -8,7 +8,8 @@ import {
   getKpiSummary,
   getSalesTable,
   getSalesForecast,
-  getItemsForecastByCategory,   // <-- was missing
+  getItemsForecastByCategory,
+  getPretrainedForecast,   // <-- new
 } from "../controllers/analyticsController.js";
 import { validateAnalyticsQuery } from "../middleware/analyticsMiddleware.js";
 
@@ -20,6 +21,7 @@ router.get("/categoryBreakdown", validateAnalyticsQuery, getCategoryBreakdown);
 router.get("/kpiSummary", validateAnalyticsQuery, getKpiSummary);
 router.get("/sales", validateAnalyticsQuery, getSalesTable);
 router.get("/forecast", getSalesForecast);
-router.get("/forecast-by-category", getItemsForecastByCategory);   // <-- was missing
+router.get("/forecast-by-category", getItemsForecastByCategory);
+router.get("/forecast-pretrained/:key", getPretrainedForecast);   // <-- new
 
 export default router;

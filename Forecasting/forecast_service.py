@@ -2,10 +2,12 @@ import itertools
 import logging
 import os
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
+import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
@@ -30,8 +32,158 @@ if not DATABASE_URL:
 app = FastAPI(title="Jamstart Coffee - Sales Forecasting Service")
 
 MIN_MONTHS_REQUIRED = 6  # Prophet/ARIMA/SARIMA need a reasonable history to be useful
-CATEGORY_FORECAST_MAX_WORKERS = max(1, min(8, (os.cpu_count() or 1)))
-CATEGORY_MIN_MONTHS_FOR_PROPHET = 12
+
+# ---------------------------------------------------------------------------
+# PRE-TRAINED PMDARIMA MODELS (client-supplied)
+# ---------------------------------------------------------------------------
+# These are ALREADY-FITTED pmdarima.ARIMA objects the client sent you --
+# NOT something this service trains. That's a different code path from
+# find_best_sarima_order()/SARIMAX below, which fits a fresh statsmodels
+# model from scratch on every request. Here you load once and call .predict().
+#
+# STEP 1: pip install pmdarima==2.1.1 joblib --break-system-packages
+#         (version pin matters -- both files were pickled with pmdarima 2.1.1)
+#
+# STEP 2: put the two files the client sent you here:
+#           <project_root>/models/sarima_model.pkl
+#           <project_root>/models/demand_sarima_model.pkl
+#
+# STEP 3: fill in PRETRAINED_MODEL_META below once you know from the client
+#         what series each model was trained on (whole store? one category?
+#         which one?) and the last month of data used to train it. Without
+#         the correct last_trained_month, forecasted months will be labeled
+#         wrong even though the numbers themselves are fine.
+MODEL_DIR = Path(__file__).parent / "model"
+
+PRETRAINED_MODEL_META = {
+    "sarima": {
+        "file": MODEL_DIR / "sarima_model.pkl",
+        "last_trained_month": "2026-01",  # confirmed against client's own forecast output (Jul-Dec 2026)
+        # Values are in the tens of thousands (56406, 62147...) -- that's
+        # revenue scale (₱), not units. Confirm with client, but plotting
+        # this against unit-scale history was what made the actual line
+        # look flat.
+        "target": "revenue",
+    },
+    "demand": {
+        "file": MODEL_DIR / "demand_sarima_model.pkl",
+        "last_trained_month": "2026-01",  # confirmed against client's own forecast output (Jul-Dec 2026)
+        "target": "units",
+    },
+}
+
+
+@lru_cache(maxsize=None)
+def load_pretrained_model(key: str):
+    """Loads a client-supplied pmdarima model once per process and reuses it."""
+    if key not in PRETRAINED_MODEL_META:
+        raise KeyError(f"Unknown pretrained model key '{key}'. Valid keys: {list(PRETRAINED_MODEL_META)}")
+    path = PRETRAINED_MODEL_META[key]["file"]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Expected pretrained model file at {path}, but it doesn't exist. "
+            f"Did you copy the .pkl the client sent into the models/ folder?"
+        )
+    return joblib.load(path)
+
+
+def run_pretrained_forecast(key: str, months_ahead: int) -> dict:
+    """
+    Forecasts using a client-supplied pre-trained pmdarima model instead of
+    fitting a new one. Returns both "history" (actual monthly units from
+    the Sale table, up through the last imported month) and "forecast"
+    (predicted months after that), so the frontend can draw history as a
+    solid line and the forecast as a dashed/broken line continuing from it
+    -- same pattern as /forecast/sales.
+
+    IMPORTANT: the model is frozen at meta["last_trained_month"] and always
+    predicts sequentially from there. The forecast should pick up right
+    after the last actual month you've imported (fetch_last_actual_month()),
+    NOT from today's calendar date and NOT from the model's own training
+    cutoff -- those are almost never the same month. We predict far enough
+    ahead to cover that gap, then drop the already-elapsed months and only
+    return the next `months_ahead` months counting from your latest import.
+    """
+    model = load_pretrained_model(key)
+    meta = PRETRAINED_MODEL_META[key]
+    last_known_date = pd.to_datetime(meta["last_trained_month"], format="%Y-%m")
+
+    last_actual_month = fetch_last_actual_month()
+    if last_actual_month is None:
+        # No data in the Sale table at all -- fall back to today's month
+        # so the service still returns something instead of erroring.
+        last_actual_month = pd.Timestamp(date.today().replace(day=1))
+
+    elapsed_months = (
+        (last_actual_month.year - last_known_date.year) * 12
+        + (last_actual_month.month - last_known_date.month)
+    )
+    elapsed_months = max(elapsed_months, 0)  # in case last_trained_month is still "ahead" of your data
+
+    total_periods = elapsed_months + months_ahead
+    predicted, conf_int = model.predict(n_periods=total_periods, return_conf_int=True, alpha=0.05)
+    predicted = np.asarray(predicted)
+    conf_int = np.asarray(conf_int)
+
+    forecast = []
+    for i in range(elapsed_months, total_periods):
+        future_date = last_known_date + pd.DateOffset(months=i + 1)
+        forecast.append({
+            "month": future_date.strftime("%Y-%m"),
+            "predictedValue": round(max(float(predicted[i]), 0)),
+            "lowerBound": round(max(float(conf_int[i, 0]), 0)),
+            "upperBound": round(max(float(conf_int[i, 1]), 0)),
+        })
+
+    # Actual history from the Sale table, so the frontend has something
+    # solid to draw before the dashed forecast line picks up.
+    sales_df = fetch_monthly_sales()
+    history = [
+        {
+            "month": row.month,
+            "actualUnits": int(row.total_units),
+            "actualRevenue": round(float(row.total_revenue), 2),
+        }
+        for row in sales_df.itertuples()
+    ]
+
+    return {"history": history, "forecast": forecast}
+
+
+def update_pretrained_model(key: str, new_values: list[float]):
+    """
+    Optional. pmdarima supports .update() to fold in new actuals without a
+    full refit. Only wire this up if the client actually wants the model to
+    evolve over time -- confirm first, since it mutates the cached model in
+    memory. To persist the update across restarts you'd need to
+    joblib.dump() it back to the same path afterward.
+    """
+    model = load_pretrained_model(key)
+    model.update(np.asarray(new_values))
+    return model
+# ---------------------------------------------------------------------------
+
+
+def fetch_last_actual_month() -> Optional[pd.Timestamp]:
+    """
+    Returns the first day of the most recent month present in the Sale
+    table (e.g. if the latest imported row is dated 2026-06-15, returns
+    2026-06-01). Used so pretrained forecasts start right after your real
+    data ends, instead of starting from today's calendar date or from the
+    model's frozen training cutoff.
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql(
+            'SELECT to_char(date_trunc(\'month\', MAX(date)), \'YYYY-MM\') AS last_month FROM "Sale"',
+            conn,
+        )
+        last_month = df["last_month"].iloc[0]
+        if not last_month:
+            return None
+        return pd.to_datetime(last_month, format="%Y-%m")
+    finally:
+        conn.close()
 
 
 def get_connection():
@@ -67,24 +219,6 @@ def fetch_monthly_sales(category: Optional[str] = None, item_name: Optional[str]
         conn.close()
 
 
-def fetch_monthly_units_by_category() -> pd.DataFrame:
-    """Pulls monthly units sold, grouped by category."""
-    conn = get_connection()
-    try:
-        query = """
-            SELECT to_char(date_trunc('month', date), 'YYYY-MM') AS month,
-                   category,
-                   SUM(items_sold)::int AS total_units
-            FROM "Sale"
-            GROUP BY date_trunc('month', date), category
-            ORDER BY category ASC, month ASC
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    finally:
-        conn.close()
-
-
 def run_prophet_forecast(df: pd.DataFrame, months_ahead: int) -> pd.DataFrame:
     prophet_df = df.rename(columns={"month": "ds", "total_revenue": "y"})[["ds", "y"]]
     prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
@@ -103,60 +237,13 @@ def run_prophet_forecast(df: pd.DataFrame, months_ahead: int) -> pd.DataFrame:
     return forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(months_ahead)
 
 
-def run_prophet_units_forecast(category_df: pd.DataFrame, months_ahead: int) -> pd.DataFrame:
-    """Same idea as run_prophet_forecast, but works on units sold instead of revenue."""
-    prophet_df = category_df.rename(columns={"month": "ds", "total_units": "y"})[["ds", "y"]]
-    prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
-
-    model = Prophet(
-        yearly_seasonality=True,
-        weekly_seasonality=False,
-        daily_seasonality=False,
-        uncertainty_samples=100,
-    )
-    model.fit(prophet_df, iter=200)
-
-    future = model.make_future_dataframe(periods=months_ahead, freq="MS")
-    forecast = model.predict(future)
-
-    return forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(months_ahead)
-
-
-def run_simple_average_forecast(category_df: pd.DataFrame, months_ahead: int) -> list:
-    """
-    Fallback for sparse/low-volume categories where Prophet can't converge
-    or where there isn't enough history for Prophet to be trustworthy.
-    Uses a simple trailing average (+/- 1 std dev) of the last few months instead.
-    """
-    recent_window = category_df.tail(6)
-    avg_units = recent_window["total_units"].mean()
-    std_units = recent_window["total_units"].std()
-    std_units = 0 if pd.isna(std_units) else std_units
-
-    last_month_str = category_df["month"].iloc[-1]
-    last_date = pd.to_datetime(last_month_str, format="%Y-%m")
-
-    forecast = []
-    for i in range(1, months_ahead + 1):
-        future_date = last_date + pd.DateOffset(months=i)
-        forecast.append({
-            "month": future_date.strftime("%Y-%m"),
-            "predictedUnits": round(max(avg_units, 0)),
-            "lowerBound": round(max(avg_units - std_units, 0)),
-            "upperBound": round(max(avg_units + std_units, 0)),
-        })
-
-    return forecast
-
-
 def interpret_accuracy(mae: float, rmse: float, mape: Optional[float]) -> dict:
     """
     Translates raw backtest metrics into a plain verdict.
 
     Ideal ranges:
       - MAPE: <=10% excellent, 10-20% acceptable, >20% poor
-      - MAE:  <=5000 good, otherwise high (revenue scale -- if reused for a
-              units-based backtest, consider a relative threshold instead)
+      - MAE:  <=5000 good, otherwise high (revenue scale)
       - RMSE: should stay close to MAE; a big gap (ratio > 1.5) means
               a few months had much bigger misses than the rest (outliers)
     """
@@ -325,48 +412,6 @@ def run_backtest_arima(df: pd.DataFrame, holdout_months: int) -> dict:
     }
 
 
-def run_backtest_units_arima(category_df: pd.DataFrame, holdout_months: int) -> dict:
-    """ARIMA equivalent of run_backtest_units() -- same idea, on units instead of revenue."""
-    series_df = category_df.copy()
-    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
-    series_df = series_df.set_index("ds")["total_units"]
-    series_df.index.freq = "MS"
-
-    train_series = series_df.iloc[:-holdout_months]
-    test_series = series_df.iloc[-holdout_months:]
-
-    order = find_best_arima_order(train_series)
-    model = ARIMA(train_series, order=order).fit()
-    predicted_values = model.forecast(steps=holdout_months).values
-
-    actual = test_series.values
-    errors = actual - predicted_values
-    abs_errors = np.abs(errors)
-
-    mae = float(np.mean(abs_errors))
-    rmse = float(np.sqrt(np.mean(errors ** 2)))
-    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
-
-    comparison = [
-        {
-            "month": test_series.index[i].strftime("%Y-%m"),
-            "actualUnits": int(actual[i]),
-            "predictedUnits": round(float(predicted_values[i])),
-            "errorAmount": round(float(errors[i]), 2),
-            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
-        }
-        for i in range(holdout_months)
-    ]
-
-    return {
-        "order": order,
-        "mae": round(mae, 2),
-        "rmse": round(rmse, 2),
-        "mape": round(mape, 2) if not np.isnan(mape) else None,
-        "comparison": comparison,
-    }
-
-
 def run_backtest_sarima(df: pd.DataFrame, holdout_months: int) -> dict:
     """
     SARIMA equivalent of run_backtest() -- adds seasonal (P,D,Q,12) terms on
@@ -404,55 +449,6 @@ def run_backtest_sarima(df: pd.DataFrame, holdout_months: int) -> dict:
             "month": test_series.index[i].strftime("%Y-%m"),
             "actualRevenue": round(float(actual[i]), 2),
             "predictedRevenue": round(float(predicted_values[i]), 2),
-            "errorAmount": round(float(errors[i]), 2),
-            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
-        }
-        for i in range(holdout_months)
-    ]
-
-    return {
-        "order": order,
-        "seasonalOrder": seasonal_order,
-        "mae": round(mae, 2),
-        "rmse": round(rmse, 2),
-        "mape": round(mape, 2) if not np.isnan(mape) else None,
-        "comparison": comparison,
-    }
-
-
-def run_backtest_units_sarima(category_df: pd.DataFrame, holdout_months: int) -> dict:
-    """SARIMA equivalent of run_backtest_units() -- units instead of revenue."""
-    series_df = category_df.copy()
-    series_df["ds"] = pd.to_datetime(series_df["month"], format="%Y-%m")
-    series_df = series_df.set_index("ds")["total_units"]
-    series_df.index.freq = "MS"
-
-    train_series = series_df.iloc[:-holdout_months]
-    test_series = series_df.iloc[-holdout_months:]
-
-    order, seasonal_order = find_best_sarima_order(train_series)
-    model = SARIMAX(
-        train_series,
-        order=order,
-        seasonal_order=seasonal_order,
-        enforce_stationarity=False,
-        enforce_invertibility=False,
-    ).fit(disp=False)
-    predicted_values = model.forecast(steps=holdout_months).values
-
-    actual = test_series.values
-    errors = actual - predicted_values
-    abs_errors = np.abs(errors)
-
-    mae = float(np.mean(abs_errors))
-    rmse = float(np.sqrt(np.mean(errors ** 2)))
-    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
-
-    comparison = [
-        {
-            "month": test_series.index[i].strftime("%Y-%m"),
-            "actualUnits": int(actual[i]),
-            "predictedUnits": round(float(predicted_values[i])),
             "errorAmount": round(float(errors[i]), 2),
             "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
         }
@@ -521,104 +517,9 @@ def run_backtest(df: pd.DataFrame, holdout_months: int) -> dict:
     }
 
 
-def run_backtest_units(category_df: pd.DataFrame, holdout_months: int) -> dict:
-    """Same idea as run_backtest(), but for units sold within a single category."""
-    prophet_df = category_df.rename(columns={"month": "ds", "total_units": "y"})[["ds", "y"]]
-    prophet_df["ds"] = pd.to_datetime(prophet_df["ds"], format="%Y-%m")
-
-    train_df = prophet_df.iloc[:-holdout_months]
-    test_df = prophet_df.iloc[-holdout_months:].reset_index(drop=True)
-
-    model = Prophet(
-        yearly_seasonality=True,
-        weekly_seasonality=False,
-        daily_seasonality=False,
-    )
-    model.fit(train_df)
-
-    future = model.make_future_dataframe(periods=holdout_months, freq="MS")
-    forecast = model.predict(future)
-    predicted = forecast[["ds", "yhat"]].tail(holdout_months).reset_index(drop=True)
-
-    actual = test_df["y"].values
-    predicted_values = predicted["yhat"].values
-
-    errors = actual - predicted_values
-    abs_errors = np.abs(errors)
-
-    mae = float(np.mean(abs_errors))
-    rmse = float(np.sqrt(np.mean(errors ** 2)))
-    mape = float(np.mean(np.abs(errors / np.where(actual == 0, np.nan, actual))) * 100)
-
-    comparison = [
-        {
-            "month": test_df["ds"].iloc[i].strftime("%Y-%m"),
-            "actualUnits": int(actual[i]),
-            "predictedUnits": round(float(predicted_values[i])),
-            "errorAmount": round(float(errors[i]), 2),
-            "errorPct": round(float(errors[i] / actual[i] * 100), 2) if actual[i] != 0 else None,
-        }
-        for i in range(holdout_months)
-    ]
-
-    return {
-        "mae": round(mae, 2),
-        "rmse": round(rmse, 2),
-        "mape": round(mape, 2) if not np.isnan(mape) else None,
-        "comparison": comparison,
-    }
-
-
-def _forecast_one_category(category: str, category_df: pd.DataFrame, months_ahead: int) -> dict:
-    """
-    Fits/forecasts a single category. Runs inside a worker process via
-    ProcessPoolExecutor, so it MUST be a top-level function (picklable) --
-    it can't be a nested closure or lambda.
-    """
-    history = [
-        {"month": row.month, "actualUnits": int(row.total_units)}
-        for row in category_df.itertuples()
-    ]
-
-    if len(category_df) < CATEGORY_MIN_MONTHS_FOR_PROPHET:
-        return {
-            "category": category,
-            "history": history,
-            "forecast": run_simple_average_forecast(category_df, months_ahead),
-            "method": "simple_average",
-            "note": f"Not enough history for Prophet (need {CATEGORY_MIN_MONTHS_FOR_PROPHET}+ months, found {len(category_df)}) — used trailing average instead.",
-        }
-
-    try:
-        forecast_result = run_prophet_units_forecast(category_df, months_ahead)
-        forecast = [
-            {
-                "month": row.ds.strftime("%Y-%m"),
-                "predictedUnits": round(max(row.yhat, 0)),
-                "lowerBound": round(max(row.yhat_lower, 0)),
-                "upperBound": round(max(row.yhat_upper, 0)),
-            }
-            for row in forecast_result.itertuples()
-        ]
-        return {
-            "category": category,
-            "history": history,
-            "forecast": forecast,
-            "method": "prophet",
-        }
-    except Exception:
-        return {
-            "category": category,
-            "history": history,
-            "forecast": run_simple_average_forecast(category_df, months_ahead),
-            "method": "simple_average",
-            "note": "Prophet failed to converge on this category's data — used trailing average instead.",
-        }
-
-
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v5-prophet-arima-sarima"}
+    return {"status": "ok", "time": datetime.utcnow().isoformat(), "version": "v7-prophet-arima-sarima-pretrained"}
 
 
 @app.get("/forecast/sales")
@@ -669,56 +570,6 @@ def forecast_sales(
         "monthsAhead": months_ahead,
         "history": history,
         "forecast": forecast,
-    }
-
-
-@app.get("/forecast/items-by-category")
-def forecast_items_by_category(
-    months_ahead: int = Query(3, ge=1, le=24, description="How many months to forecast"),
-):
-    """
-    Forecasts expected ITEMS SOLD (units), broken down per category.
-    Uses Prophet where there's enough clean history, and falls back to a
-    simple trailing average for sparse/low-volume categories.
-    """
-    try:
-        df = fetch_monthly_units_by_category()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-    if df.empty:
-        return {"error": "No sales data found."}
-
-    categories = df["category"].unique()
-    category_frames = {
-        c: df[df["category"] == c].reset_index(drop=True) for c in categories
-    }
-
-    results = []
-    max_workers = min(CATEGORY_FORECAST_MAX_WORKERS, len(categories)) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_forecast_one_category, c, category_frames[c], months_ahead): c
-            for c in categories
-        }
-        for future in as_completed(futures):
-            category = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as e:
-                results.append({
-                    "category": category,
-                    "history": [],
-                    "forecast": [],
-                    "method": "error",
-                    "note": f"Forecast failed: {str(e)}",
-                })
-
-    results.sort(key=lambda row: row["category"])
-
-    return {
-        "monthsAhead": months_ahead,
-        "categories": results,
     }
 
 
@@ -806,95 +657,46 @@ def backtest_sales(
     }
 
 
-@app.get("/forecast/backtest-category")
-def backtest_category(
-    category: str = Query(..., description="Category to backtest (required)"),
-    holdout_months: int = Query(3, ge=1, le=12, description="How many recent months to hold out and test against"),
-):
-    """
-    Categorical/units backtest -- separate route from /forecast/backtest
-    since this operates on units sold for a single category, not revenue.
-    Runs Prophet, ARIMA, and SARIMA, and returns a bestModel verdict.
-    """
-    try:
-        df = fetch_monthly_units_by_category()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-    category_df = df[df["category"] == category].reset_index(drop=True)
-
-    min_required = MIN_MONTHS_REQUIRED + holdout_months
-    if category_df.empty or len(category_df) < min_required:
-        return {
-            "error": f"Not enough historical data to backtest. Need at least {min_required} months "
-                     f"({MIN_MONTHS_REQUIRED} to train + {holdout_months} to hold out), found {len(category_df)}.",
-            "category": category,
-        }
-
-    try:
-        prophet_result = run_backtest_units(category_df, holdout_months)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prophet backtest error: {str(e)}")
-
-    try:
-        arima_result = run_backtest_units_arima(category_df, holdout_months)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"ARIMA backtest error: {str(e)}")
-
-    try:
-        sarima_result = run_backtest_units_sarima(category_df, holdout_months)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SARIMA backtest error: {str(e)}")
-
-    best = compare_models({
-        "prophet": prophet_result,
-        "arima": arima_result,
-        "sarima": sarima_result,
-    })
-
-    return {
-        "category": category,
-        "holdoutMonths": holdout_months,
-        "prophet": {
-            "accuracy": {
-                "mae": prophet_result["mae"],
-                "rmse": prophet_result["rmse"],
-                "mape": prophet_result["mape"],
-            },
-            "verdict": interpret_accuracy(prophet_result["mae"], prophet_result["rmse"], prophet_result["mape"]),
-            "monthByMonth": prophet_result["comparison"],
-        },
-        "arima": {
-            "order": arima_result["order"],
-            "accuracy": {
-                "mae": arima_result["mae"],
-                "rmse": arima_result["rmse"],
-                "mape": arima_result["mape"],
-            },
-            "verdict": interpret_accuracy(arima_result["mae"], arima_result["rmse"], arima_result["mape"]),
-            "monthByMonth": arima_result["comparison"],
-        },
-        "sarima": {
-            "order": sarima_result["order"],
-            "seasonalOrder": sarima_result["seasonalOrder"],
-            "accuracy": {
-                "mae": sarima_result["mae"],
-                "rmse": sarima_result["rmse"],
-                "mape": sarima_result["mape"],
-            },
-            "verdict": interpret_accuracy(sarima_result["mae"], sarima_result["rmse"], sarima_result["mape"]),
-            "monthByMonth": sarima_result["comparison"],
-        },
-        "bestModel": best,
-    }
-
-
 @app.get("/forecast/categories")
 def list_categories():
-    """Helper endpoint so the frontend can populate a category dropdown."""
+    """Helper endpoint so the frontend can populate a category dropdown for /forecast/sales."""
     conn = get_connection()
     try:
         df = pd.read_sql('SELECT DISTINCT category FROM "Sale" ORDER BY category ASC', conn)
         return {"categories": df["category"].tolist()}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints serving the client's pre-trained pmdarima models
+# ---------------------------------------------------------------------------
+@app.get("/forecast/pretrained/{key}")
+def forecast_pretrained(
+    key: str,
+    months_ahead: int = Query(3, ge=1, le=24, description="How many months to forecast"),
+):
+    """
+    Serves forecasts straight from the client's pre-trained SARIMA models
+    (sarima_model.pkl / demand_sarima_model.pkl) instead of fitting a new
+    model on request. key is "sarima" or "demand" per PRETRAINED_MODEL_META.
+    """
+    if key not in PRETRAINED_MODEL_META:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pretrained model for '{key}'. Valid keys: {list(PRETRAINED_MODEL_META)}",
+        )
+    try:
+        result = run_pretrained_forecast(key, months_ahead)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pretrained forecast error: {str(e)}")
+
+    return {
+        "key": key,
+        "target": PRETRAINED_MODEL_META[key]["target"],
+        "monthsAhead": months_ahead,
+        "history": result["history"],
+        "forecast": result["forecast"],
+    }

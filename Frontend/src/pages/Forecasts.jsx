@@ -3,32 +3,47 @@ import {
   Area,
   CartesianGrid,
   ComposedChart,
+  Legend,
   Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
-  Bar,
-  BarChart,
 } from 'recharts';
 import {
   AlertCircle,
-  CalendarRange,
-  ChartColumn,
+  BrainCircuit,
+  ChevronDown,
+  ChevronUp,
   Loader2,
   RefreshCw,
-  Sparkles,
-  TrendingDown,
-  TrendingUp,
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
 const MONTH_OPTIONS = [3, 6, 12];
-const HISTORY_WINDOW_OPTIONS = [3, 6, 12, 24];
 
-const peso = (n) =>
-  `₱${Number(n ?? 0).toLocaleString('en-PH', { maximumFractionDigits: 0 })}`;
+// key -> display label + copy for the two pretrained models. Matches the
+// "key" values forecast_service.py's PRETRAINED_MODEL_META expects
+// ("sarima", "demand").
+const PRETRAINED_MODELS = [
+  {
+    key: 'sarima',
+    label: 'Sales forecast',
+    eyebrow: 'Pretrained model',
+    description: 'Projected units from the pretrained SARIMA model.',
+  },
+  {
+    key: 'demand',
+    label: 'Demand forecast',
+    eyebrow: 'Pretrained model',
+    description: 'Projected demand from the pretrained demand model.',
+  },
+];
+
+const units = (n) => `${Number(n ?? 0).toLocaleString('en-PH', { maximumFractionDigits: 0 })} units`;
+const peso = (n) => `₱${Number(n ?? 0).toLocaleString('en-PH', { maximumFractionDigits: 0 })}`;
+const formatValue = (n, target) => (target === 'revenue' ? peso(n) : units(n));
 
 async function fetchJSON(url) {
   const res = await fetch(url);
@@ -41,7 +56,7 @@ async function fetchJSON(url) {
 
 // Custom tooltip so we can hide the "range" series instead of relying on
 // a formatter returning null (inconsistent across Recharts versions).
-function RevenueTooltip({ active, payload, label }) {
+function ValueTooltip({ active, payload, label, target }) {
   if (!active || !payload?.length) return null;
   const visible = payload.filter((p) => p.dataKey !== 'range' && p.value != null);
   if (!visible.length) return null;
@@ -50,204 +65,247 @@ function RevenueTooltip({ active, payload, label }) {
       <p className="mb-1 font-medium text-emerald-950">{label}</p>
       {visible.map((p) => (
         <p key={p.dataKey} style={{ color: p.stroke }}>
-          {p.name}: {peso(p.value)}
+          {p.name}: {formatValue(p.value, target)}
         </p>
       ))}
     </div>
   );
 }
 
+// Combines a model's history + forecast into one array Recharts can plot,
+// with "actualValue" (solid line) transitioning into "predictedValue"
+// (dashed line). Picks actualRevenue vs actualUnits from history depending
+// on what this model's forecast scale actually represents -- plotting the
+// wrong one is what made the actual line look flat before. Bridges the gap
+// by carrying the last actual value into the first forecast point, so the
+// two lines connect instead of leaving a visible break between them.
+function buildChartSeries(history, forecast, target, historyWindow = 6) {
+  const historyField = target === 'revenue' ? 'actualRevenue' : 'actualUnits';
+  const recentHistory = (history ?? []).slice(-historyWindow);
+  const historyRows = recentHistory.map((h) => ({
+    month: h.month,
+    actualValue: h[historyField],
+    predictedValue: null,
+    range: null,
+  }));
+  if (historyRows.length) {
+    historyRows[historyRows.length - 1].predictedValue =
+      historyRows[historyRows.length - 1].actualValue;
+  }
+  const forecastRows = (forecast ?? []).map((f) => ({
+    month: f.month,
+    actualValue: null,
+    predictedValue: f.predictedValue,
+    range: [f.lowerBound, f.upperBound],
+  }));
+  return [...historyRows, ...forecastRows];
+}
+
+function ForecastChart({ chartData, target }) {
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#d6e2db" />
+        <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
+        <YAxis
+          tickLine={false}
+          axisLine={false}
+          fontSize={12}
+          width={target === 'revenue' ? 70 : 50}
+          tickFormatter={(v) => (target === 'revenue' ? peso(v) : v)}
+        />
+        <Tooltip content={<ValueTooltip target={target} />} />
+        <Legend
+          verticalAlign="top"
+          align="right"
+          iconType="plainline"
+          wrapperStyle={{ fontSize: 12, color: '#14532d', paddingBottom: 8 }}
+        />
+        <Area
+          dataKey="range"
+          stroke="none"
+          fill="#14532d"
+          fillOpacity={0.12}
+          name="Confidence range"
+          legendType="none"
+        />
+        <Line
+          type="linear"
+          dataKey="actualValue"
+          name="Actual"
+          stroke="#14532d"
+          strokeWidth={2.5}
+          dot={{ r: 3 }}
+          activeDot={{ r: 5 }}
+          connectNulls={false}
+        />
+        <Line
+          type="linear"
+          dataKey="predictedValue"
+          name="Forecast"
+          stroke="#14532d"
+          strokeWidth={2.5}
+          strokeDasharray="6 6"
+          dot={{ r: 3 }}
+          activeDot={{ r: 5 }}
+          connectNulls
+        />
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+}
+
+function ForecastTable({ forecastKey, forecast, expanded, onToggle, target }) {
+  const rows = expanded ? forecast : forecast.slice(0, 3);
+  const fmt = (n) => formatValue(n, target);
+  return (
+    <div className="mt-4">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[320px] border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-emerald-900/10 text-left text-xs uppercase tracking-[0.2em] text-lime-700/60">
+              <th className="py-2 pr-4">Month</th>
+              <th className="py-2 pr-4 text-right">Predicted</th>
+              <th className="py-2 pl-4 text-right">Range</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((f) => (
+              <tr key={f.month} className="border-b border-emerald-900/5">
+                <td className="py-2 pr-4 font-medium text-emerald-950">{f.month}</td>
+                <td className="py-2 pr-4 text-right text-emerald-900/80">{fmt(f.predictedValue)}</td>
+                <td className="py-2 pl-4 text-right text-emerald-900/60">
+                  {fmt(f.lowerBound)}–{fmt(f.upperBound)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {forecast.length > 3 && (
+        <button
+          onClick={() => onToggle(forecastKey)}
+          className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-900/10 py-2 text-xs font-medium text-emerald-900/60 hover:bg-emerald-50"
+        >
+          {expanded ? (
+            <>
+              Show less <ChevronUp className="h-3.5 w-3.5" />
+            </>
+          ) : (
+            <>
+              Show all {forecast.length} months <ChevronDown className="h-3.5 w-3.5" />
+            </>
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function Forecasts() {
-  const [monthsAhead, setMonthsAhead] = useState(3);
-  const [category, setCategory] = useState('');
-  const [historyWindow, setHistoryWindow] = useState(6);
+  // One entry per pretrained model key -- { sarima: {...}, demand: {...} }
+  const [pretrained, setPretrained] = useState({});
+  const [pretrainedLoading, setPretrainedLoading] = useState({});
+  const [pretrainedError, setPretrainedError] = useState({});
+  const [expandedTables, setExpandedTables] = useState({});
+  const [pretrainedMonthsAhead, setPretrainedMonthsAhead] = useState(
+    () => Object.fromEntries(PRETRAINED_MODELS.map((m) => [m.key, 3]))
+  );
 
-  const [revenue, setRevenue] = useState(null);
-  const [revenueLoading, setRevenueLoading] = useState(true);
-  const [revenueError, setRevenueError] = useState(null);
+  const toggleTable = (key) => {
+    setExpandedTables((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
-  const [byCategory, setByCategory] = useState(null);
-  const [categoryLoading, setCategoryLoading] = useState(true);
-  const [categoryError, setCategoryError] = useState(null);
-
-  const loadRevenue = async () => {
-    setRevenueLoading(true);
-    setRevenueError(null);
+  const loadPretrained = async (key, months = pretrainedMonthsAhead[key]) => {
+    setPretrainedLoading((prev) => ({ ...prev, [key]: true }));
+    setPretrainedError((prev) => ({ ...prev, [key]: null }));
     try {
-      const params = new URLSearchParams({ monthsAhead });
-      if (category) params.set('category', category);
-      const data = await fetchJSON(`${API_BASE}/analytics/forecast?${params}`);
-      setRevenue(data);
+      const params = new URLSearchParams({ monthsAhead: months });
+      const data = await fetchJSON(`${API_BASE}/analytics/forecast-pretrained/${key}?${params}`);
+      setPretrained((prev) => ({ ...prev, [key]: data }));
     } catch (err) {
-      setRevenue(null);
-      setRevenueError(err.message);
+      setPretrained((prev) => ({ ...prev, [key]: null }));
+      setPretrainedError((prev) => ({ ...prev, [key]: err.message }));
     } finally {
-      setRevenueLoading(false);
+      setPretrainedLoading((prev) => ({ ...prev, [key]: false }));
     }
   };
 
-  const loadCategories = async () => {
-    setCategoryLoading(true);
-    setCategoryError(null);
-    try {
-      const params = new URLSearchParams({ monthsAhead });
-      const data = await fetchJSON(`${API_BASE}/analytics/forecast-by-category?${params}`);
-      setByCategory(data);
-    } catch (err) {
-      setByCategory(null);
-      setCategoryError(err.message);
-    } finally {
-      setCategoryLoading(false);
-    }
+  const handlePretrainedMonthsChange = (key, months) => {
+    setPretrainedMonthsAhead((prev) => ({ ...prev, [key]: months }));
+    loadPretrained(key, months);
   };
 
   useEffect(() => {
-    loadRevenue();
+    PRETRAINED_MODELS.forEach((m) => loadPretrained(m.key, pretrainedMonthsAhead[m.key]));
+    // Runs once on mount -- per-card filter changes call loadPretrained directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthsAhead, category]);
+  }, []);
 
-  useEffect(() => {
-    loadCategories();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthsAhead]);
+  // --- Sales forecast (sarima) -- the primary panel, with its own summary card ---
+  const salesData = pretrained.sarima;
+  const salesLoading = pretrainedLoading.sarima;
+  const salesError = pretrainedError.sarima;
+  const salesMonthsAhead = pretrainedMonthsAhead.sarima;
+  const salesTarget = salesData?.target ?? 'units';
 
-  const categoryOptions = useMemo(
-    () => byCategory?.categories?.map((c) => c.category) ?? [],
-    [byCategory]
+  const salesChartData = useMemo(
+    () => buildChartSeries(salesData?.history, salesData?.forecast, salesTarget),
+    [salesData, salesTarget]
   );
 
-  const revenueChartData = useMemo(() => {
-    if (!revenue) return [];
-    const recentHistory = (revenue.history ?? []).slice(-historyWindow);
-    const history = recentHistory.map((h) => ({
-      month: h.month,
-      actualRevenue: h.actualRevenue,
-      predictedRevenue: null,
-      range: null,
-    }));
-    if (history.length) {
-      history[history.length - 1].predictedRevenue = history[history.length - 1].actualRevenue;
-    }
-    const forecast = (revenue.forecast ?? []).map((f) => ({
-      month: f.month,
-      actualRevenue: null,
-      predictedRevenue: f.predictedRevenue,
-      range: [f.lowerBound, f.upperBound],
-    }));
-    return [...history, ...forecast];
-  }, [revenue]);
-
-  const projectedTotal = useMemo(
-    () => (revenue?.forecast ?? []).reduce((sum, f) => sum + (f.predictedRevenue ?? 0), 0),
-    [revenue]
-  );
-
-  const lastActual = revenue?.history?.at(-1)?.actualRevenue ?? null;
-  const firstForecast = revenue?.forecast?.[0]?.predictedRevenue ?? null;
-  const trendPct =
-    lastActual && firstForecast != null && lastActual > 0
-      ? ((firstForecast - lastActual) / lastActual) * 100
-      : null;
-
-  const categoryRanking = useMemo(() => {
-    if (!byCategory?.categories?.length) return [];
-    return byCategory.categories
-      .map((c) => ({
-        category: c.category,
-        method: c.method,
-        note: c.note,
-        totalUnits: (c.forecast ?? []).reduce((s, f) => s + (f.predictedUnits ?? 0), 0),
-        forecast: c.forecast ?? [],
-      }))
-      .sort((a, b) => b.totalUnits - a.totalUnits);
-  }, [byCategory]);
-
-  // Use whichever category actually has forecast months, in case the
-  // top-ranked one is empty for some reason.
-  const tableMonths = useMemo(() => {
-    const withMonths = categoryRanking.find((c) => c.forecast.length);
-    return withMonths?.forecast ?? [];
-  }, [categoryRanking]);
+  // --- Demand forecast -- secondary panel ---
+  const demandModel = PRETRAINED_MODELS.find((m) => m.key === 'demand');
 
   return (
     <section className="grid gap-6">
-      {/* Header + controls */}
+      {/* Header */}
       <div className="rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] p-6 sm:p-8">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-          <div className="max-w-2xl">
-            <p className="text-xs uppercase tracking-[0.35em] text-lime-700/70">Forecasts</p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-emerald-950 sm:text-4xl">
-              Sales forecast
-            </h1>
-            <p className="mt-3 text-sm leading-6 text-emerald-900/65 sm:text-base">
-              Prophet-driven projections generated from your actual sales history. Low-volume
-              categories fall back to a trailing average when there isn't enough history to model.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-3 lg:w-[22rem]">
-            <div className="flex items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white p-1.5">
-              {MONTH_OPTIONS.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMonthsAhead(m)}
-                  className={`flex-1 rounded-xl px-3 py-2 text-sm font-medium transition ${
-                    monthsAhead === m
-                      ? 'bg-emerald-950 text-white'
-                      : 'text-emerald-900/60 hover:bg-emerald-50'
-                  }`}
-                >
-                  {m}mo
-                </button>
-              ))}
-            </div>
-
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-2.5 text-sm text-emerald-950 outline-none focus:ring-2 focus:ring-emerald-900/20"
-            >
-              <option value="">All categories</option>
-              {categoryOptions.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="max-w-2xl">
+          <p className="text-xs uppercase tracking-[0.35em] text-lime-700/70">Forecasts</p>
+          <h1 className="mt-3 text-3xl font-semibold tracking-tight text-emerald-950 sm:text-4xl">
+            Sales forecast
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-emerald-900/65 sm:text-base">
+            Projections from the pretrained SARIMA and demand models. Each section has its own
+            forecast window.
+          </p>
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.35fr_0.95fr]">
-        {/* Revenue forecast chart */}
-        <div className="rounded-[1.5rem] border border-emerald-900/10 bg-white p-6 sm:p-8">
+      {/* Sales forecast chart (sarima model) */}
+      <div className="rounded-[1.5rem] border border-emerald-900/10 bg-white p-6 sm:p-8">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-900">
-                <ChartColumn className="h-5 w-5" />
+                <BrainCircuit className="h-5 w-5" />
               </div>
               <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-lime-700/60">Revenue</p>
+                <p className="text-xs uppercase tracking-[0.3em] text-lime-700/60">Pretrained model</p>
                 <h2 className="mt-1 text-2xl font-semibold tracking-tight text-emerald-950">
-                  Actual vs. projected
+                  Sales forecast
                 </h2>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <select
-                value={historyWindow}
-                onChange={(e) => setHistoryWindow(Number(e.target.value))}
-                className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2 text-xs font-medium text-emerald-950 outline-none focus:ring-2 focus:ring-emerald-900/20"
-                title="Past months to show"
-              >
-                {HISTORY_WINDOW_OPTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    Past {m}mo
-                  </option>
+              <div className="flex items-center gap-1 rounded-xl border border-emerald-900/10 bg-[#fbfaf7] p-1">
+                {MONTH_OPTIONS.map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => handlePretrainedMonthsChange('sarima', m)}
+                    className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                      salesMonthsAhead === m
+                        ? 'bg-emerald-950 text-white'
+                        : 'text-emerald-900/60 hover:bg-emerald-50'
+                    }`}
+                  >
+                    {m}mo
+                  </button>
                 ))}
-              </select>
+              </div>
               <button
-                onClick={loadRevenue}
+                onClick={() => loadPretrained('sarima')}
                 className="flex h-9 w-9 items-center justify-center rounded-full border border-emerald-900/10 text-emerald-900/60 hover:bg-emerald-50"
                 title="Refresh"
               >
@@ -257,228 +315,132 @@ export default function Forecasts() {
           </div>
 
           <div className="mt-6 h-80 rounded-3xl border border-emerald-900/10 bg-[#fbfaf7] p-3 sm:p-4">
-            {revenueLoading ? (
+            {salesLoading ? (
               <div className="flex h-full items-center justify-center gap-2 text-emerald-900/50">
                 <Loader2 className="h-4 w-4 animate-spin" /> Loading forecast…
               </div>
-            ) : revenueError ? (
+            ) : salesError ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-emerald-900/60">
                 <AlertCircle className="h-5 w-5" />
-                <p className="max-w-xs text-sm">{revenueError}</p>
+                <p className="max-w-xs text-sm">{salesError}</p>
               </div>
-            ) : revenueChartData.length === 0 ? (
+            ) : salesChartData.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-emerald-900/50">
                 No forecast data available.
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={revenueChartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#d6e2db" />
-                  <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={peso} width={70} />
-                  <Tooltip content={<RevenueTooltip />} />
-                  <Area
-                    dataKey="range"
-                    stroke="none"
-                    fill="#84cc16"
-                    fillOpacity={0.15}
-                    name="Confidence range"
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="actualRevenue"
-                    name="Actual"
-                    stroke="#14532d"
-                    strokeWidth={3}
-                    dot={{ r: 3 }}
-                    connectNulls={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="predictedRevenue"
-                    name="Forecast"
-                    stroke="#84cc16"
-                    strokeWidth={3}
-                    strokeDasharray="6 6"
-                    dot={{ r: 3 }}
-                    connectNulls
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
+              <ForecastChart chartData={salesChartData} target={salesTarget} />
             )}
           </div>
-        </div>
 
-        {/* Summary + category ranking */}
-        <div className="grid gap-6">
-          <div className="rounded-[1.5rem] border border-emerald-900/10 bg-white p-6 sm:p-8">
-            <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white text-emerald-900 ring-1 ring-emerald-900/10">
-                <Sparkles className="h-5 w-5" />
-              </div>
-              <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-lime-700/60">Summary</p>
-                <h2 className="mt-1 text-2xl font-semibold tracking-tight text-emerald-950">
-                  Next {monthsAhead} months
-                </h2>
-              </div>
-            </div>
-
-            <div className="mt-6 grid gap-4">
-              <article className="rounded-2xl border border-emerald-900/10 bg-[#fbfaf7] p-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-lime-700/55">Projected revenue</p>
-                <p className="mt-2 text-2xl font-semibold text-emerald-950">
-                  {revenueLoading ? '—' : peso(projectedTotal)}
-                </p>
-                <p className="mt-1 text-sm text-emerald-900/65">
-                  Sum of monthly predictions, {category || 'all categories'}
-                </p>
-              </article>
-
-              <article className="rounded-2xl border border-emerald-900/10 bg-[#fbfaf7] p-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-lime-700/55">Near-term direction</p>
-                <div className="mt-2 flex items-center gap-2">
-                  {trendPct == null ? (
-                    <p className="text-2xl font-semibold text-emerald-950">—</p>
-                  ) : (
-                    <>
-                      {trendPct >= 0 ? (
-                        <TrendingUp className="h-5 w-5 text-emerald-700" />
-                      ) : (
-                        <TrendingDown className="h-5 w-5 text-amber-700" />
-                      )}
-                      <p className="text-2xl font-semibold text-emerald-950">
-                        {trendPct >= 0 ? '+' : ''}
-                        {trendPct.toFixed(1)}%
-                      </p>
-                    </>
-                  )}
-                </div>
-                <p className="mt-1 text-sm text-emerald-900/65">Next month vs. last recorded month</p>
-              </article>
-            </div>
-          </div>
-
-          <div className="rounded-[1.5rem] border border-emerald-900/10 bg-[#0f2f24] p-6 text-white sm:p-8">
-            <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white/10 text-white">
-                <CalendarRange className="h-5 w-5" />
-              </div>
-              <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-white/55">Top categories</p>
-                <h2 className="mt-1 text-2xl font-semibold tracking-tight">Projected units</h2>
-              </div>
-            </div>
-
-            <div className="mt-5 h-52">
-              {categoryLoading ? (
-                <div className="flex h-full items-center justify-center gap-2 text-white/50">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-                </div>
-              ) : categoryError ? (
-                <div className="flex h-full items-center justify-center text-center text-sm text-white/60">
-                  {categoryError}
-                </div>
-              ) : categoryRanking.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-sm text-white/50">
-                  No category data available.
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={categoryRanking} layout="vertical" margin={{ top: 0, right: 20, left: 0, bottom: 0 }}>
-                    <XAxis type="number" hide />
-                    <YAxis
-                      type="category"
-                      dataKey="category"
-                      width={90}
-                      tickLine={false}
-                      axisLine={false}
-                      fontSize={12}
-                      stroke="#ffffffaa"
-                    />
-                    <Tooltip
-                      formatter={(v) => [`${v} units`, 'Projected']}
-                      contentStyle={{ borderRadius: '16px', border: 'none' }}
-                    />
-                    <Bar dataKey="totalUnits" fill="#84cc16" radius={[0, 10, 10, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-        </div>
+          {!salesLoading && !salesError && salesChartData.length > 0 && (
+            <ForecastTable
+              forecastKey="sarima"
+              forecast={salesData.forecast}
+              expanded={!!expandedTables.sarima}
+              onToggle={toggleTable}
+              target={salesTarget}
+            />
+          )}
       </div>
 
-      {/* Detailed per-category table */}
+      {/* Demand forecast */}
       <div className="rounded-[1.5rem] border border-emerald-900/10 bg-white p-6 sm:p-8">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-lime-100 text-lime-900">
-            <ChartColumn className="h-5 w-5" />
-          </div>
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-lime-700/60">Breakdown</p>
-            <h2 className="mt-1 text-2xl font-semibold tracking-tight text-emerald-950">
-              Units by category, month by month
-            </h2>
-          </div>
-        </div>
+        {(() => {
+          const key = demandModel.key;
+          const data = pretrained[key];
+          const loading = pretrainedLoading[key];
+          const error = pretrainedError[key];
+          const months = pretrainedMonthsAhead[key];
 
-        <div className="mt-6 overflow-x-auto">
-          {categoryLoading ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-emerald-900/50">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-            </div>
-          ) : categoryError ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-emerald-900/60">
-              <AlertCircle className="h-4 w-4" /> {categoryError}
-            </div>
-          ) : categoryRanking.length === 0 ? (
-            <div className="py-10 text-center text-sm text-emerald-900/50">
-              No category forecasts available.
-            </div>
-          ) : (
-            <table className="w-full min-w-[640px] border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-emerald-900/10 text-left text-xs uppercase tracking-[0.2em] text-lime-700/60">
-                  <th className="py-3 pr-4">Category</th>
-                  {tableMonths.map((f) => (
-                    <th key={f.month} className="py-3 pr-4 text-right">
-                      {f.month}
-                    </th>
-                  ))}
-                  <th className="py-3 pl-4 text-right">Method</th>
-                </tr>
-              </thead>
-              <tbody>
-                {categoryRanking.map((c) => (
-                  <tr key={c.category} className="border-b border-emerald-900/5">
-                    <td className="py-3 pr-4 font-medium text-emerald-950">{c.category}</td>
-                    {tableMonths.map((month) => {
-                      const match = c.forecast.find((f) => f.month === month.month);
-                      return (
-                        <td key={month.month} className="py-3 pr-4 text-right text-emerald-900/80">
-                          {match?.predictedUnits ?? '—'}
-                        </td>
-                      );
-                    })}
-                    <td className="py-3 pl-4 text-right">
-                      <span
-                        title={c.note || undefined}
-                        className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                          c.method === 'prophet'
-                            ? 'bg-emerald-50 text-emerald-800'
-                            : 'bg-amber-50 text-amber-800'
+          const target = data?.target ?? 'units';
+          const chartData = buildChartSeries(data?.history, data?.forecast, target);
+
+          const totalValue = (data?.forecast ?? []).reduce(
+            (sum, f) => sum + (f.predictedValue ?? 0),
+            0
+          );
+
+          return (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-lime-100 text-lime-900">
+                    <BrainCircuit className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-lime-700/60">
+                      {demandModel.eyebrow}
+                    </p>
+                    <h2 className="mt-1 text-2xl font-semibold tracking-tight text-emerald-950">
+                      {demandModel.label}
+                    </h2>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 rounded-xl border border-emerald-900/10 bg-[#fbfaf7] p-1">
+                    {MONTH_OPTIONS.map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => handlePretrainedMonthsChange(key, m)}
+                        className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                          months === m
+                            ? 'bg-emerald-950 text-white'
+                            : 'text-emerald-900/60 hover:bg-emerald-50'
                         }`}
                       >
-                        {c.method === 'prophet' ? 'Modeled' : 'Trailing avg'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+                        {m}mo
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => loadPretrained(key)}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-emerald-900/10 text-emerald-900/60 hover:bg-emerald-50"
+                    title="Refresh"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <p className="mt-4 text-2xl font-semibold text-emerald-950">
+                {loading ? '—' : formatValue(totalValue, target)}
+              </p>
+              <p className="mt-1 text-sm text-emerald-900/65">
+                Projected total, next {months} months
+              </p>
+
+              <div className="mt-5 h-64 rounded-3xl border border-emerald-900/10 bg-[#fbfaf7] p-3 sm:p-4">
+                {loading ? (
+                  <div className="flex h-full items-center justify-center gap-2 text-emerald-900/50">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                  </div>
+                ) : error ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-emerald-900/60">
+                    <AlertCircle className="h-5 w-5" />
+                    <p className="max-w-xs text-sm">{error}</p>
+                  </div>
+                ) : chartData.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-sm text-emerald-900/50">
+                    No forecast data available.
+                  </div>
+                ) : (
+                  <ForecastChart chartData={chartData} target={target} />
+                )}
+              </div>
+
+              {!loading && !error && chartData.length > 0 && (
+                <ForecastTable
+                  forecastKey={key}
+                  forecast={data.forecast}
+                  expanded={!!expandedTables[key]}
+                  onToggle={toggleTable}
+                  target={target}
+                />
+              )}
+            </>
+          );
+        })()}
       </div>
     </section>
   );
