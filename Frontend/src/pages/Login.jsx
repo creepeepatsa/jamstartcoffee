@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRight, Coffee, Mail, Lock, Sparkles, ShieldCheck, Loader2 } from 'lucide-react';
+import { ArrowRight, Coffee, Mail, Lock, Sparkles, ShieldCheck, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 function Login() {
@@ -11,6 +11,7 @@ function Login() {
 	// UI feedback state
 	const [error, setError] = useState('');
 	const [submitting, setSubmitting] = useState(false);
+	const [showPassword, setShowPassword] = useState(false);
 
 	const { login } = useAuth();       // pulls the login() function from AuthContext
 	const navigate = useNavigate();    // lets us redirect after a successful login
@@ -88,35 +89,43 @@ function Login() {
 										<div className="flex items-center gap-3 rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-emerald-950 transition focus-within:border-lime-300/60 focus-within:bg-lime-50">
 											<Lock className="h-4 w-4 text-lime-700/80" />
 											<input
-												type="password"
-												name="password"
-												value={password}
-												onChange={(e) => setPassword(e.target.value)}
-												placeholder="Enter your password"
-												required
-												className="w-full bg-transparent text-sm outline-none placeholder:text-emerald-900/35"
-											/>
-										</div>
-									</label>
+											type={showPassword ? 'text' : 'password'}
+											name="password"
+											value={password}
+											onChange={(e) => setPassword(e.target.value)}
+											placeholder="Enter your password"
+											required
+											className="w-full bg-transparent text-sm outline-none placeholder:text-emerald-900/35"
+										/>
+										<button
+											type="button"
+											onClick={() => setShowPassword((prev) => !prev)}
+											className="flex h-8 w-8 items-center justify-center rounded-full text-emerald-900/60 transition hover:bg-emerald-50 hover:text-emerald-900"
+											aria-label={showPassword ? 'Hide password' : 'Show password'}
+										>
+											{showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+										</button>
+									</div>
+								</label>
 
-									<button
-										type="submit"
-										disabled={submitting}
-										className="group flex w-full items-center justify-center gap-2 rounded-2xl bg-lime-200 px-4 py-3.5 text-sm font-semibold text-emerald-950 transition hover:bg-lime-300 disabled:cursor-not-allowed disabled:opacity-60"
-									>
-										{submitting ? (
-											<>
-												<Loader2 className="h-4 w-4 animate-spin" />
-												Signing in...
-											</>
-										) : (
-											<>
-												Continue to dashboard
-												<ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
-											</>
-										)}
-									</button>
-								</form>
+								<button
+									type="submit"
+									disabled={submitting}
+									className="group flex w-full items-center justify-center gap-2 rounded-2xl bg-lime-200 px-4 py-3.5 text-sm font-semibold text-emerald-950 transition hover:bg-lime-300 disabled:cursor-not-allowed disabled:opacity-60"
+								>
+									{submitting ? (
+										<>
+											<Loader2 className="h-4 w-4 animate-spin" />
+											Signing in...
+										</>
+									) : (
+										<>
+											Continue to dashboard
+											<ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
+										</>
+									)}
+								</button>
+							</form>
 
 								<div className="mt-6 flex items-center gap-3 rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm text-emerald-900/70">
 									<ShieldCheck className="h-4 w-4 text-lime-700" />
