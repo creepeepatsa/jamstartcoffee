@@ -16,9 +16,21 @@ model User {
   suffix    String?
   email     String   @unique
   password  String
-  role      String   @default("Admin")
+  role      String   @default("Staff")
   createdAt DateTime @default(now())
   isActive Boolean @default(true)
+}
+
+model PasswordChangeRequest {
+  id          Int      @id @default(autoincrement())
+  email       String
+  status      String   @default("pending")
+  requestedAt DateTime @default(now())
+  resolvedAt  DateTime?
+  resolvedBy  String?
+
+  @@index([status])
+  @@index([email])
 }
 
 model Sale {

@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Calendar,
-  ChevronLeft,
-  ChevronRight,
   Package,
   RefreshCcw,
   Sparkles,
@@ -12,16 +10,12 @@ import {
   Wallet,
 } from 'lucide-react';
 import {
-  Area,
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
-  ComposedChart,
   Legend,
   Line,
-  Pie,
-  PieChart,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -32,14 +26,11 @@ import { useAuth } from '../context/AuthContext';
 import { fetchCategoryBreakdown, fetchKpiSummary, fetchSalesTrend, fetchTopItems } from '../api/analytics';
 
 const periodOptions = [
-  { label: 'All Time', value: 'all' },
-  { label: 'Last Year', value: 'year' },
-  { label: 'Last Quarter', value: 'quarter' },
-  { label: 'Last Month', value: 'month' },
+  { label: 'All time', value: 'all' },
+  { label: 'Last year', value: 'year' },
+  { label: 'Last quarter', value: 'quarter' },
+  { label: 'Last month', value: 'month' },
 ];
-
-const categoryPalette = ['#14532d', '#166534', '#15803d', '#65a30d', '#84cc16', '#a3e635', '#4d7c0f', '#f59e0b'];
-const itemPalette = ['#0f766e', '#0891b2', '#0369a1', '#4338ca', '#7c3aed', '#a21caf', '#be123c', '#c2410c'];
 
 const currencyFormatter = new Intl.NumberFormat('en-PH', {
   style: 'currency',
@@ -88,7 +79,6 @@ function getKpiRangeFromMonth(monthValue) {
 
   const year = Number(match[1]);
   const month = Number(match[2]);
-  const currentMonthStart = new Date(Date.UTC(year, month - 1, 1));
   const previousMonthStart = new Date(Date.UTC(year, month - 2, 1));
   const nextMonthStart = new Date(Date.UTC(year, month, 1));
   const currentMonthEnd = new Date(nextMonthStart.getTime() - 1);
@@ -153,11 +143,12 @@ function EmptyState({ title, description }) {
   );
 }
 
-function YearPicker({ value, onChange }) {
+function YearPicker({ value, onChange, availableYears }) {
   const currentYear = new Date().getFullYear();
   const selectedYear = Number(value) || currentYear;
-  const firstYear = Math.max(2000, selectedYear - 5);
-  const years = Array.from({ length: 11 }, (_, index) => firstYear + index);
+  const years = availableYears === null ? [selectedYear] : availableYears;
+  const firstYear = years[0];
+  const lastYear = years[years.length - 1];
 
   return (
     <details className="relative">
@@ -168,24 +159,28 @@ function YearPicker({ value, onChange }) {
       <div className="absolute right-0 z-20 mt-2 w-56 rounded-2xl border border-emerald-900/10 bg-white p-3 shadow-lg shadow-emerald-950/10">
         <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-emerald-900/50">
           <span>Year</span>
-          <span>{firstYear}-{firstYear + 10}</span>
+          {years.length > 0 && <span>{firstYear}-{lastYear}</span>}
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          {years.map((year) => (
-            <button
-              key={year}
-              type="button"
-              onClick={() => onChange(String(year))}
-              className={`rounded-xl px-2 py-2 text-sm transition ${
-                year === selectedYear
-                  ? 'bg-emerald-700 font-semibold text-white'
-                  : 'text-emerald-950 hover:bg-emerald-50'
-              }`}
-            >
-              {year}
-            </button>
-          ))}
-        </div>
+        {years.length > 0 ? (
+          <div className="grid grid-cols-3 gap-2">
+            {years.map((year) => (
+              <button
+                key={year}
+                type="button"
+                onClick={() => onChange(String(year))}
+                className={`rounded-xl px-2 py-2 text-sm transition ${
+                  year === selectedYear
+                    ? 'bg-emerald-700 font-semibold text-white'
+                    : 'text-emerald-950 hover:bg-emerald-50'
+                }`}
+              >
+                {year}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="px-2 py-2 text-sm text-emerald-900/60">No years with data</p>
+        )}
       </div>
     </details>
   );
@@ -218,36 +213,69 @@ export default function Dashboard() {
   const { user } = useAuth();
   const name = user?.first_name || user?.name || 'there';
 
-  const defaults = useMemo(() => getPeriodRange('year'), []);
   const [period, setPeriod] = useState('year');
-  const [from, setFrom] = useState(defaults.from);
-  const [to, setTo] = useState(defaults.to);
-  const [trendPeriod, setTrendPeriod] = useState('year');
-  const [trendFrom, setTrendFrom] = useState(defaults.from);
-  const [trendTo, setTrendTo] = useState(defaults.to);
+  const { from, to } = useMemo(() => getPeriodRange(period), [period]);
+  const [salesTrendYear, setSalesTrendYear] = useState(String(new Date().getFullYear()));
+  const [demandTrendYear, setDemandTrendYear] = useState(String(new Date().getFullYear()));
+  const [availableTrendYears, setAvailableTrendYears] = useState(null);
+  const salesTrendYearRange = useMemo(() => getCalendarYearRange(salesTrendYear), [salesTrendYear]);
+  const demandTrendYearRange = useMemo(() => getCalendarYearRange(demandTrendYear), [demandTrendYear]);
   const [kpiMonth, setKpiMonth] = useState('');
   const [kpiYear, setKpiYear] = useState('');
+  const [itemMode, setItemMode] = useState('top');
+  const [itemCategory, setItemCategory] = useState('all');
+  const [categoryOptions, setCategoryOptions] = useState([{ label: 'All categories', value: 'all' }]);
 
-  const [trendData, setTrendData] = useState([]);
+  const [salesTrendData, setSalesTrendData] = useState([]);
+  const [demandTrendData, setDemandTrendData] = useState([]);
   const [topItemsData, setTopItemsData] = useState([]);
-  const [categoryData, setCategoryData] = useState([]);
   const [kpiData, setKpiData] = useState(null);
   const [yoyData, setYoyData] = useState(null);
 
-  const [trendLoading, setTrendLoading] = useState(true);
+  const [salesTrendLoading, setSalesTrendLoading] = useState(true);
+  const [demandTrendLoading, setDemandTrendLoading] = useState(true);
   const [topItemsLoading, setTopItemsLoading] = useState(true);
-  const [categoryLoading, setCategoryLoading] = useState(true);
   const [kpiLoading, setKpiLoading] = useState(true);
 
-  const [trendError, setTrendError] = useState('');
+  const [salesTrendError, setSalesTrendError] = useState('');
+  const [demandTrendError, setDemandTrendError] = useState('');
   const [topItemsError, setTopItemsError] = useState('');
-  const [categoryError, setCategoryError] = useState('');
   const [kpiError, setKpiError] = useState('');
   const [yoyError, setYoyError] = useState('');
 
   const requestRef = useRef(0);
   const kpiMonthInitializedRef = useRef(false);
   const kpiYearInitializedRef = useRef(false);
+
+  useEffect(() => {
+    let isActive = true;
+
+    fetchSalesTrend('2020-01-01', formatDateInput(new Date()))
+      .then((result) => {
+        if (!isActive) return;
+
+        const years = [...new Set(
+          (result?.trend || [])
+            .map((entry) => new Date(entry.month).getUTCFullYear())
+            .filter((year) => Number.isFinite(year))
+        )].sort((firstYear, secondYear) => firstYear - secondYear);
+
+        setAvailableTrendYears(years);
+
+        if (years.length > 0) {
+          const latestYear = String(years[years.length - 1]);
+          setSalesTrendYear((year) => (years.includes(Number(year)) ? year : latestYear));
+          setDemandTrendYear((year) => (years.includes(Number(year)) ? year : latestYear));
+        }
+      })
+      .catch(() => {
+        if (isActive) setAvailableTrendYears([]);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const kpiRange = useMemo(() => {
     if (!kpiMonth) return { from, to };
@@ -281,28 +309,22 @@ export default function Dashboard() {
     };
   }, [kpiMonth]);
 
-  const applyTrendPeriod = useCallback((nextPeriod) => {
-    const range = getPeriodRange(nextPeriod);
-    setTrendPeriod(nextPeriod);
-    setTrendFrom(range.from);
-    setTrendTo(range.to);
-  }, []);
-
   const loadOverview = useCallback(async () => {
     const requestId = ++requestRef.current;
-    setTrendLoading(true);
+    setSalesTrendLoading(true);
+    setDemandTrendLoading(true);
     setTopItemsLoading(true);
-    setCategoryLoading(true);
     setKpiLoading(true);
-    setTrendError('');
+    setSalesTrendError('');
+    setDemandTrendError('');
     setTopItemsError('');
-    setCategoryError('');
     setKpiError('');
     setYoyError('');
 
-    const [trendResult, topItemsResult, categoryResult, kpiResult, yoyResult] = await Promise.allSettled([
-      fetchSalesTrend(trendFrom, trendTo),
-      fetchTopItems(from, to, 5),
+    const [salesTrendResult, demandTrendResult, topItemsResult, categoryResult, kpiResult, yoyResult] = await Promise.allSettled([
+      fetchSalesTrend(salesTrendYearRange.from, salesTrendYearRange.to),
+      fetchSalesTrend(demandTrendYearRange.from, demandTrendYearRange.to),
+      fetchTopItems(from, to, 5, itemCategory, itemMode === 'least' ? 'asc' : 'desc'),
       fetchCategoryBreakdown(from, to),
       fetchKpiSummary(kpiRange.from, kpiRange.to),
       fetchKpiSummary(yoyRange.from, yoyRange.to),
@@ -310,11 +332,18 @@ export default function Dashboard() {
 
     if (requestId !== requestRef.current) return;
 
-    if (trendResult.status === 'fulfilled') {
-      setTrendData(trendResult.value?.trend || []);
+    if (salesTrendResult.status === 'fulfilled') {
+      setSalesTrendData(salesTrendResult.value?.trend || []);
     } else {
-      setTrendData([]);
-      setTrendError(trendResult.reason?.response?.data?.error || 'Unable to load sales trend.');
+      setSalesTrendData([]);
+      setSalesTrendError(salesTrendResult.reason?.response?.data?.error || 'Unable to load sales trend.');
+    }
+
+    if (demandTrendResult.status === 'fulfilled') {
+      setDemandTrendData(demandTrendResult.value?.trend || []);
+    } else {
+      setDemandTrendData([]);
+      setDemandTrendError(demandTrendResult.reason?.response?.data?.error || 'Unable to load demand trend.');
     }
 
     if (topItemsResult.status === 'fulfilled') {
@@ -325,10 +354,14 @@ export default function Dashboard() {
     }
 
     if (categoryResult.status === 'fulfilled') {
-      setCategoryData(categoryResult.value?.categories || []);
-    } else {
-      setCategoryData([]);
-      setCategoryError(categoryResult.reason?.response?.data?.error || 'Unable to load category breakdown.');
+      const options = (categoryResult.value?.categories || [])
+        .map((entry) => entry.category)
+        .filter(Boolean)
+        .map((category) => ({ label: category, value: category }));
+      setCategoryOptions([{ label: 'All categories', value: 'all' }, ...options]);
+      if (itemCategory !== 'all' && !options.some((option) => option.value === itemCategory)) {
+        setItemCategory('all');
+      }
     }
 
     if (kpiResult.status === 'fulfilled') {
@@ -345,111 +378,83 @@ export default function Dashboard() {
       setYoyError(yoyResult.reason?.response?.data?.error || 'Unable to load year over year growth.');
     }
 
-    setTrendLoading(false);
+    setSalesTrendLoading(false);
+    setDemandTrendLoading(false);
     setTopItemsLoading(false);
-    setCategoryLoading(false);
     setKpiLoading(false);
-  }, [trendFrom, trendTo, from, to, kpiRange, yoyRange]);
+  }, [salesTrendYearRange, demandTrendYearRange, from, to, itemCategory, itemMode, kpiRange, yoyRange]);
 
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
 
   useEffect(() => {
-    if (kpiMonthInitializedRef.current || trendLoading || trendData.length === 0) return;
+    if (kpiMonthInitializedRef.current || salesTrendLoading || salesTrendData.length === 0) return;
 
-    const latestMonthWithData = [...trendData].reverse()[0];
+    const latestMonthWithData = [...salesTrendData].reverse()[0];
     if (!latestMonthWithData?.month) return;
 
     const latestMonth = new Date(latestMonthWithData.month);
     const monthValue = `${latestMonth.getUTCFullYear()}-${String(latestMonth.getUTCMonth() + 1).padStart(2, '0')}`;
     setKpiMonth(monthValue);
     kpiMonthInitializedRef.current = true;
-  }, [trendData, trendLoading]);
+  }, [salesTrendData, salesTrendLoading]);
 
   useEffect(() => {
-    if (kpiYearInitializedRef.current || trendLoading || trendData.length === 0) return;
+    if (kpiYearInitializedRef.current || salesTrendLoading || salesTrendData.length === 0) return;
 
-    const latestEntryWithData = [...trendData].reverse().find((entry) => Number(entry.totalRevenue) > 0);
+    const latestEntryWithData = [...salesTrendData].reverse().find((entry) => Number(entry.totalRevenue) > 0);
     if (!latestEntryWithData?.month) return;
 
     setKpiYear(String(new Date(latestEntryWithData.month).getUTCFullYear()));
     kpiYearInitializedRef.current = true;
-  }, [trendData, trendLoading]);
+  }, [salesTrendData, salesTrendLoading]);
 
-  const trendChartData = useMemo(
+  const salesTrendChartData = useMemo(
     () =>
-      trendData.map((entry) => ({
+      salesTrendData.map((entry) => ({
         month: formatMonth(entry.month),
         revenue: Number(entry.totalRevenue) || 0,
         units: Number(entry.totalUnits) || 0,
       })),
-    [trendData]
+    [salesTrendData]
+  );
+
+  const demandTrendChartData = useMemo(
+    () =>
+      demandTrendData.map((entry) => ({
+        month: formatMonth(entry.month),
+        units: Number(entry.totalUnits) || 0,
+      })),
+    [demandTrendData]
   );
 
   const topItemsChartData = useMemo(
     () =>
-      [...topItemsData]
-        .sort((a, b) => Number(b.revenue) - Number(a.revenue))
-        .map((entry) => ({
+      topItemsData.map((entry) => ({
           itemName: entry.itemName,
+          category: entry.category,
+          unitsSold: Number(entry.unitsSold) || 0,
           revenue: Number(entry.revenue) || 0,
         })),
     [topItemsData]
   );
 
-  const itemShareChartData = useMemo(
-    () =>
-      topItemsData.map((entry) => ({
-        name: entry.itemName,
-        value: Number(entry.revenue) || 0,
-      })),
-    [topItemsData]
-  );
-
-  const categoryChartData = useMemo(
-    () =>
-      categoryData.map((entry) => ({
-        name: entry.category,
-        value: Number(entry.revenue) || 0,
-      })),
-    [categoryData]
-  );
-
-  // KPI stat row totals — derived from the same trend series that the
-  // period buttons above the revenue chart already control.
-  const trendRangeDays = useMemo(() => {
-    const start = new Date(trendFrom);
-    const end = new Date(trendTo);
+  const periodRangeDays = useMemo(() => {
+    const start = new Date(from);
+    const end = new Date(to);
     const diff = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
     return diff > 0 ? diff : 0;
-  }, [trendFrom, trendTo]);
+  }, [from, to]);
 
-  const totalRevenue = useMemo(
-    () => trendChartData.reduce((sum, entry) => sum + entry.revenue, 0),
-    [trendChartData]
-  );
-
-  const totalUnitsSold = useMemo(
-    () => trendChartData.reduce((sum, entry) => sum + entry.units, 0),
-    [trendChartData]
-  );
-
-  const avgDailyRevenue = useMemo(
-    () => (trendRangeDays > 0 ? totalRevenue / trendRangeDays : 0),
-    [totalRevenue, trendRangeDays]
-  );
-
-  const trendPeriodLabel = useMemo(
-    () => periodOptions.find((option) => option.value === trendPeriod)?.label || 'Selected period',
-    [trendPeriod]
-  );
+  const totalRevenue = kpiData?.totalRevenue ?? 0;
+  const totalUnitsSold = kpiData?.totalUnitsSold ?? 0;
+  const avgDailyRevenue = periodRangeDays > 0 ? totalRevenue / periodRangeDays : 0;
+  const selectedPeriodLabel = periodOptions.find((option) => option.value === period)?.label || 'Selected period';
 
   const handleRefresh = () => {
     void loadOverview();
   };
-
-  const isCurrentTrendPeriod = (value) => trendPeriod === value;
 
   const momChangePct = kpiData?.monthOverMonth?.changePct ?? null;
   const isGrowthPositive = momChangePct !== null && momChangePct >= 0;
@@ -476,26 +481,24 @@ export default function Dashboard() {
               Welcome back, {name}. Your cafe performance is easy to scan.
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-emerald-900/65 sm:text-base">
-              Focus on the sales trend, category mix, and top products without the table clutter.
+              Focus on monthly sales, demand, and top products without the table clutter.
             </p>
           </div>
 
           <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white p-1 shadow-sm shadow-emerald-950/5">
               {periodOptions.map((option) => (
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => applyTrendPeriod(option.value)}
-                  className={`inline-flex items-center gap-1 rounded-full px-4 py-2 text-[0.65rem] font-semibold uppercase tracking-[0.22em] transition ${
-                    isCurrentTrendPeriod(option.value)
+                  onClick={() => setPeriod(option.value)}
+                  className={`rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+                    period === option.value
                       ? 'bg-emerald-950 text-white shadow-sm shadow-emerald-950/10'
-                      : 'border border-emerald-900/10 bg-white text-emerald-900/70 hover:bg-emerald-50'
+                      : 'text-emerald-900/65 hover:bg-emerald-50 hover:text-emerald-950'
                   }`}
                 >
-                  {option.value === 'month' && <ChevronLeft className="h-3.5 w-3.5" />}
                   {option.label}
-                  {option.value === 'quarter' && <ChevronRight className="h-3.5 w-3.5" />}
                 </button>
               ))}
             </div>
@@ -517,127 +520,104 @@ export default function Dashboard() {
           icon={<Wallet className="h-6 w-6" />}
           label="Total sales"
           value={formatCurrency(totalRevenue)}
-          sublabel={trendPeriodLabel}
-          loading={trendLoading}
-          error={trendError}
+          sublabel={selectedPeriodLabel}
+          loading={kpiLoading}
+          error={kpiError}
         />
         <KpiStatCard
           icon={<Package className="h-6 w-6" />}
           label="Total units sold"
           value={formatNumber(totalUnitsSold)}
-          sublabel={trendPeriodLabel}
-          loading={trendLoading}
-          error={trendError}
+          sublabel={selectedPeriodLabel}
+          loading={kpiLoading}
+          error={kpiError}
         />
         <KpiStatCard
           icon={<Activity className="h-6 w-6" />}
           label="Average daily revenue"
           value={formatCurrency(avgDailyRevenue)}
-          sublabel={trendRangeDays ? `Across ${trendRangeDays} days` : trendPeriodLabel}
-          loading={trendLoading}
-          error={trendError}
+          sublabel={periodRangeDays ? `Across ${periodRangeDays} days` : selectedPeriodLabel}
+          loading={kpiLoading}
+          error={kpiError}
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-5">
+      <div className="grid gap-6 xl:grid-cols-2">
         <SectionCard
-          title="Revenue trend"
-          description="Revenue and units sold over time for the selected period."
-          className="xl:col-span-3"
+          title="Monthly sales trend"
+          description={`Monthly revenue for ${salesTrendYear}.`}
+          action={
+            <div className="flex items-center gap-2">
+              <span className="text-xs uppercase tracking-[0.18em] text-emerald-900/50">Trend year</span>
+              <YearPicker value={salesTrendYear} onChange={setSalesTrendYear} availableYears={availableTrendYears} />
+            </div>
+          }
         >
-          {trendError ? (
-            <EmptyState title="Trend chart unavailable" description={trendError} />
-          ) : trendLoading ? (
+          {salesTrendError ? (
+            <EmptyState title="Sales trend unavailable" description={salesTrendError} />
+          ) : salesTrendLoading ? (
             <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
               Loading trend data...
             </div>
-          ) : trendChartData.length === 0 ? (
+          ) : salesTrendChartData.length === 0 ? (
             <EmptyState title="No trend data in this range" description="Try a wider period preset to show more historical sales activity." />
           ) : (
             <div className="h-[22rem]">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={trendChartData} margin={{ top: 10, right: 12, bottom: 0, left: 0 }}>
-                  <defs>
-                    <linearGradient id="trendRevenue" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#14532d" stopOpacity={0.35} />
-                      <stop offset="95%" stopColor="#14532d" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
+                <LineChart data={salesTrendChartData} margin={{ top: 10, right: 12, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
                   <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                  <YAxis yAxisId="left" tickLine={false} axisLine={false} width={44} />
-                  <YAxis yAxisId="right" orientation="right" tickLine={false} axisLine={false} width={44} />
-                  <Tooltip
-                    formatter={(value, name) => [name === 'revenue' ? formatCurrency(value) : formatNumber(value), name === 'revenue' ? 'Revenue' : 'Units sold']}
-                    labelStyle={{ color: '#14532d', fontWeight: 600 }}
-                  />
+                  <YAxis tickLine={false} axisLine={false} width={56} />
+                  <Tooltip formatter={(value) => formatCurrency(value)} labelStyle={{ color: '#14532d', fontWeight: 600 }} />
                   <Legend />
-                  <Area type="monotone" yAxisId="left" dataKey="revenue" name="Revenue" stroke="#14532d" fill="url(#trendRevenue)" strokeWidth={2} />
-                  <Line yAxisId="right" type="monotone" dataKey="units" name="Units sold" stroke="#84cc16" strokeWidth={2.5} dot={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </SectionCard>
-
-        <SectionCard title="Category mix" description="Revenue share by category." className="xl:col-span-2">
-          {categoryError ? (
-            <EmptyState title="Category breakdown unavailable" description={categoryError} />
-          ) : categoryLoading ? (
-            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
-              Loading category data...
-            </div>
-          ) : categoryChartData.length === 0 ? (
-            <EmptyState title="No category data yet" description="This period does not contain enough records to build the chart." />
-          ) : (
-            <div className="h-[22rem]">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Tooltip formatter={(value) => formatCurrency(value)} />
-                  <Legend />
-                  <Pie data={categoryChartData} dataKey="value" nameKey="name" innerRadius={72} outerRadius={108} paddingAngle={3}>
-                    {categoryChartData.map((entry, index) => (
-                      <Cell key={entry.name} fill={categoryPalette[index % categoryPalette.length]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </SectionCard>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-6">
-        <SectionCard title="Item revenue share" description="Revenue share by product for the selected period." className="xl:col-span-2">
-          {topItemsError ? (
-            <EmptyState title="Item revenue share unavailable" description={topItemsError} />
-          ) : topItemsLoading ? (
-            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
-              Loading item revenue share...
-            </div>
-          ) : itemShareChartData.length === 0 ? (
-            <EmptyState title="No item revenue data yet" description="Try a wider period preset to surface product performance." />
-          ) : (
-            <div className="h-[22rem]">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Tooltip formatter={(value) => formatCurrency(value)} />
-                  <Legend />
-                  <Pie data={itemShareChartData} dataKey="value" nameKey="name" innerRadius={72} outerRadius={108} paddingAngle={3}>
-                    {itemShareChartData.map((entry, index) => (
-                      <Cell key={entry.name} fill={itemPalette[index % itemPalette.length]} />
-                    ))}
-                  </Pie>
-                </PieChart>
+                  <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#14532d" strokeWidth={2.5} dot={false} />
+                </LineChart>
               </ResponsiveContainer>
             </div>
           )}
         </SectionCard>
 
         <SectionCard
+          title="Monthly demand trend"
+          description={`Monthly units sold for ${demandTrendYear}.`}
+          action={
+            <div className="flex items-center gap-2">
+              <span className="text-xs uppercase tracking-[0.18em] text-emerald-900/50">Trend year</span>
+              <YearPicker value={demandTrendYear} onChange={setDemandTrendYear} availableYears={availableTrendYears} />
+            </div>
+          }
+        >
+          {demandTrendError ? (
+            <EmptyState title="Demand trend unavailable" description={demandTrendError} />
+          ) : demandTrendLoading ? (
+            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
+              Loading demand data...
+            </div>
+          ) : demandTrendChartData.length === 0 ? (
+            <EmptyState title="No demand data in this year" description="Choose another year to show recorded monthly demand." />
+          ) : (
+            <div className="h-[22rem]">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={demandTrendChartData} margin={{ top: 10, right: 12, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
+                  <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                  <YAxis tickLine={false} axisLine={false} width={56} />
+                  <Tooltip formatter={(value) => formatNumber(value)} labelStyle={{ color: '#14532d', fontWeight: 600 }} />
+                  <Legend />
+                  <Line type="monotone" dataKey="units" name="Units sold" stroke="#84cc16" strokeWidth={2.5} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </SectionCard>
+
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-6">
+        <SectionCard
           title="Month over month growth"
           description="Current month revenue vs previous month."
-          className="xl:col-span-2"
+          className="xl:col-span-3"
           action={
             <div className="flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white px-3 py-2 text-sm text-emerald-950 shadow-sm shadow-emerald-950/5">
@@ -705,10 +685,10 @@ export default function Dashboard() {
         <SectionCard
           title="Year over year growth"
           description="Selected year revenue vs previous year."
-          className="xl:col-span-2"
+          className="xl:col-span-3"
           action={
             <div className="flex flex-wrap items-center gap-2">
-              <YearPicker value={kpiYear} onChange={setKpiYear} />
+              <YearPicker value={kpiYear} onChange={setKpiYear} availableYears={availableTrendYears} />
 
               {kpiYear && (
                 <button
@@ -763,26 +743,81 @@ export default function Dashboard() {
         </SectionCard>
       </div>
 
-      <SectionCard title="Top products" description="Top 5 products by revenue in the selected period.">
+      <SectionCard
+        title={itemMode === 'top' ? 'Top items' : 'Least-selling items'}
+        description={`${itemMode === 'top' ? 'Top' : 'Least'} 5 items by revenue in the selected period.`}
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={itemCategory}
+              onChange={(event) => setItemCategory(event.target.value)}
+              className="rounded-2xl border border-emerald-900/10 bg-white px-3 py-2 text-sm text-emerald-950 outline-none shadow-sm shadow-emerald-950/5"
+            >
+              {categoryOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+
+            <div className="flex items-center gap-1 rounded-2xl border border-emerald-900/10 bg-white p-1 shadow-sm shadow-emerald-950/5">
+              {[
+                { label: 'Top', value: 'top' },
+                { label: 'Least', value: 'least' },
+              ].map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setItemMode(option.value)}
+                  className={`rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+                    itemMode === option.value
+                      ? 'bg-emerald-950 text-white shadow-sm shadow-emerald-950/10'
+                      : 'text-emerald-900/65 hover:bg-emerald-50 hover:text-emerald-950'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        }
+      >
         {topItemsError ? (
-          <EmptyState title="Top products unavailable" description={topItemsError} />
+          <EmptyState title="Item ranking unavailable" description={topItemsError} />
         ) : topItemsLoading ? (
           <div className="flex min-h-[18rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
-            Loading top products...
+            Loading item rankings...
           </div>
         ) : topItemsChartData.length === 0 ? (
-          <EmptyState title="No top products to display" description="Try a wider period preset to surface product performance." />
+          <EmptyState title="No items to display" description="Try another category or a wider period preset." />
         ) : (
-          <div className="h-[18rem]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={topItemsChartData} layout="vertical" margin={{ top: 10, right: 24, bottom: 0, left: 12 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
-                <XAxis type="number" tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="itemName" tickLine={false} axisLine={false} width={180} tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(value) => formatCurrency(value)} />
-                <Bar dataKey="revenue" name="Revenue" fill="#14532d" radius={[0, 10, 10, 0]} barSize={18} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.7fr)_minmax(18rem,0.8fr)]">
+            <div className="h-[18rem]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topItemsChartData} layout="vertical" margin={{ top: 10, right: 24, bottom: 0, left: 12 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
+                  <XAxis type="number" tickLine={false} axisLine={false} />
+                  <YAxis type="category" dataKey="itemName" tickLine={false} axisLine={false} width={180} tick={{ fontSize: 12 }} />
+                  <Tooltip formatter={(value) => formatCurrency(value)} />
+                  <Bar dataKey="revenue" name="Revenue" fill="#14532d" radius={[0, 10, 10, 0]} barSize={18} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            <ol className="grid content-start gap-2">
+              {topItemsChartData.map((item, index) => (
+                <li key={`${item.itemName}-${item.category || 'all'}`} className="flex items-center gap-3 rounded-2xl border border-emerald-900/10 bg-white px-4 py-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-sm font-semibold text-emerald-800">
+                    {index + 1}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-emerald-950">{item.itemName}</p>
+                    <p className="mt-1 text-xs text-emerald-900/55">{item.category || 'Uncategorized'} · {formatNumber(item.unitsSold)} units</p>
+                  </div>
+                  <span className="shrink-0 text-sm font-semibold text-emerald-800">{formatCurrency(item.revenue)}</span>
+                </li>
+              ))}
+            </ol>
           </div>
         )}
       </SectionCard>
@@ -793,4 +828,14 @@ export default function Dashboard() {
       </div>
     </section>
   );
+}
+
+function getCalendarYearRange(yearValue) {
+  if (!/^\d{4}$/.test(yearValue)) return null;
+
+  const year = Number(yearValue);
+  return {
+    from: new Date(Date.UTC(year, 0, 1)).toISOString(),
+    to: new Date(Date.UTC(year + 1, 0, 1) - 1).toISOString(),
+  };
 }

@@ -38,7 +38,7 @@ export default function AppRoutes() {
           <Route
             path="forecasts"
             element={
-              <ProtectedRoute allowedRoles={['Admin']}>
+              <ProtectedRoute allowedRoles={['Admin', 'Staff']}>
                 <Forecasts />
               </ProtectedRoute>
             }

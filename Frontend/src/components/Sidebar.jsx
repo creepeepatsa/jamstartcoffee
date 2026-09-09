@@ -24,6 +24,7 @@ const adminNavItems = [
 const userNavItems = [
   { label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
   { label: 'Sales', icon: ClipboardList, path: '/sales' },
+  { label: 'Forecasting', icon: LineChart, path: '/forecasts' },
 ];
 
 export default function Sidebar() {

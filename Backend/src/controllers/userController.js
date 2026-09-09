@@ -1,4 +1,5 @@
 import prisma from '../lib/prisma.js';
+import bcrypt from 'bcryptjs';
 import { queueActivity } from '../lib/activityLog.js';
 
 const publicUserFields = {
@@ -11,6 +12,66 @@ const publicUserFields = {
   role: true,
   isActive: true,
   createdAt: true,
+};
+
+const allowedRoles = ['Admin', 'Staff'];
+
+export const getPasswordChangeRequests = async (req, res) => {
+  try {
+    const requests = await prisma.passwordChangeRequest.findMany({
+      where: { status: 'pending' },
+      orderBy: { requestedAt: 'asc' },
+    });
+
+    res.json({ requests });
+  } catch (error) {
+    console.error('Get password change requests error:', error);
+    res.status(500).json({ error: 'Failed to fetch password change requests' });
+  }
+};
+
+export const resolvePasswordChangeRequest = async (req, res) => {
+  try {
+    const requestId = parseInt(req.params.requestId, 10);
+    const newPassword = String(req.body.newPassword || '');
+
+    if (!Number.isInteger(requestId)) {
+      return res.status(400).json({ error: 'Invalid password change request' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const request = await prisma.passwordChangeRequest.findUnique({ where: { id: requestId } });
+    if (!request || request.status !== 'pending') {
+      return res.status(404).json({ error: 'Password change request not found' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: request.email } });
+    if (!user) {
+      return res.status(404).json({ error: 'No user account matches this email' });
+    }
+
+    const password = await bcrypt.hash(newPassword, 10);
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { password } }),
+      prisma.passwordChangeRequest.update({
+        where: { id: request.id },
+        data: { status: 'resolved', resolvedAt: new Date(), resolvedBy: req.user.email },
+      }),
+    ]);
+
+    queueActivity(res, {
+      actor: req.user.email,
+      action: `Resolved password change request: ${request.email}`,
+    });
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('Resolve password change request error:', error);
+    res.status(500).json({ error: 'Failed to update password' });
+  }
 };
 
 export const getUsers = async (req, res) => {
@@ -93,6 +154,10 @@ export const updateUser = async (req, res) => {
 
     if (!existing) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (role !== undefined && !allowedRoles.includes(role)) {
+      return res.status(400).json({ error: 'Role must be Admin or Staff' });
     }
 
     if (email && email !== existing.email) {

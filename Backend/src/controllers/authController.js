@@ -26,7 +26,7 @@ const buildGeneratedCredentials = (firstName, lastName) => {
 
   return {
     email: `${normalizedFirstName[0]}${normalizedLastName}${JAMSTART_DOMAIN}`,
-    password: `${normalizedFirstName[0]}${normalizedLastName}`,
+    password: `${normalizedFirstName[0]}${normalizedLastName}1234`,
   };
 };
 
@@ -68,6 +68,7 @@ export const register = async (req, res) => {
         suffix: suffix || null,
         email: finalEmail,
         password: hashedPassword,
+        role: 'Staff',
       },
     });
 
@@ -199,5 +200,28 @@ export const getMe = async (req, res) => {
   } catch (error) {
     console.error('Get me error:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
+  }
+};
+
+export const requestPasswordChange = async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const existingRequest = await prisma.passwordChangeRequest.findFirst({
+      where: { email, status: 'pending' },
+    });
+
+    if (!existingRequest) {
+      await prisma.passwordChangeRequest.create({ data: { email } });
+    }
+
+    res.status(202).json({ message: 'Your request has been sent to an administrator.' });
+  } catch (error) {
+    console.error('Password change request error:', error);
+    res.status(500).json({ error: 'Unable to submit password change request' });
   }
 };

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, Edit2, Plus, RefreshCcw, Save, Trash2, UserRound, X } from 'lucide-react';
+import { Check, Edit2, KeyRound, Plus, RefreshCcw, Save, Trash2, UserRound, X } from 'lucide-react';
 
 import api from '../api/axios';
 import ConfirmModal from '../components/ConfirmModal';
@@ -11,7 +11,7 @@ const filterOptions = [
   { label: 'Inactive users', value: 'inactive' },
 ];
 
-const roleOptions = ['Admin', 'Staff', 'Manager'];
+const roleOptions = ['Admin', 'Staff'];
 
 const JAMSTART_DOMAIN = '@jamstart.com';
 
@@ -31,7 +31,7 @@ const buildGeneratedCredentials = (firstName, lastName) => {
 
   return {
     email: `${normalizedFirstName[0]}${normalizedLastName}${JAMSTART_DOMAIN}`,
-    password: `${normalizedFirstName[0]}${normalizedLastName}`,
+    password: `${normalizedFirstName[0]}${normalizedLastName}1234`,
   };
 };
 
@@ -42,7 +42,7 @@ const emptyUserForm = {
   suffix: '',
   email: '',
   password: '',
-  role: 'Admin',
+  role: 'Staff',
 };
 
 const formatDate = (value) =>
@@ -67,6 +67,10 @@ export default function Users() {
   const [mode, setMode] = useState('create');
   const [editingUserId, setEditingUserId] = useState(null);
   const [formData, setFormData] = useState(emptyUserForm);
+  const [passwordRequests, setPasswordRequests] = useState([]);
+  const [selectedPasswordRequest, setSelectedPasswordRequest] = useState(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [resolvingPasswordRequest, setResolvingPasswordRequest] = useState(false);
   const [confirmState, setConfirmState] = useState({
     open: false,
     user: null,
@@ -84,11 +88,11 @@ export default function Users() {
         const params = {};
 
         if (filterValue === 'active') {
-          params.active = 'true';
+          params.status = 'active';
         }
 
         if (filterValue === 'inactive') {
-          params.active = 'false';
+          params.status = 'inactive';
         }
 
         const response = await api.get('/users', { params });
@@ -113,6 +117,22 @@ export default function Users() {
       active = false;
     };
   }, [filterValue]);
+
+  useEffect(() => {
+    let active = true;
+
+    api.get('/users/password-change-requests')
+      .then((response) => {
+        if (active) setPasswordRequests(response.data.requests || []);
+      })
+      .catch(() => {
+        if (active) setError('Unable to load password change requests right now.');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!success) {
@@ -168,7 +188,7 @@ export default function Users() {
       suffix: user.suffix || '',
       email: user.email || '',
       password: '',
-      role: user.role || 'Admin',
+      role: user.role || 'Staff',
     });
     setError('');
     setIsModalOpen(true);
@@ -209,11 +229,11 @@ export default function Users() {
     const params = {};
 
     if (filterValue === 'active') {
-      params.active = 'true';
+      params.status = 'active';
     }
 
     if (filterValue === 'inactive') {
-      params.active = 'false';
+      params.status = 'inactive';
     }
 
     const response = await api.get('/users', { params });
@@ -270,6 +290,31 @@ export default function Users() {
       setError(saveError?.response?.data?.error || 'Unable to save user.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleResolvePasswordRequest = async (event) => {
+    event.preventDefault();
+
+    if (newPassword.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+
+    setResolvingPasswordRequest(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      await api.put(`/users/password-change-requests/${selectedPasswordRequest.id}/resolve`, { newPassword });
+      setPasswordRequests((current) => current.filter((request) => request.id !== selectedPasswordRequest.id));
+      setSelectedPasswordRequest(null);
+      setNewPassword('');
+      setSuccess('Password updated and request resolved.');
+    } catch (resolveError) {
+      setError(resolveError?.response?.data?.error || 'Unable to update the password.');
+    } finally {
+      setResolvingPasswordRequest(false);
     }
   };
 
@@ -468,6 +513,43 @@ export default function Users() {
         </div>
       )}
 
+      <section className="rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] p-5 shadow-sm shadow-emerald-950/5 sm:p-6">
+        <div className="flex flex-col gap-2 border-b border-emerald-900/10 pb-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.35em] text-lime-700/70">Password requests</p>
+            <p className="mt-2 text-sm text-emerald-900/65">Review requests from users who need help signing in.</p>
+          </div>
+          <span className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{passwordRequests.length} pending</span>
+        </div>
+
+        {passwordRequests.length === 0 ? (
+          <p className="pt-5 text-sm text-emerald-900/55">No pending password change requests.</p>
+        ) : (
+          <div className="grid gap-3 pt-5">
+            {passwordRequests.map((request) => (
+              <div key={request.id} className="flex flex-col gap-3 rounded-2xl border border-emerald-900/10 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium text-emerald-950">{request.email}</p>
+                  <p className="mt-1 text-xs text-emerald-900/55">Requested {formatDate(request.requestedAt)}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedPasswordRequest(request);
+                    setNewPassword('');
+                    setError('');
+                  }}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-900"
+                >
+                  <KeyRound className="h-4 w-4" />
+                  Set new password
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <Table
         title="Users"
 
@@ -508,6 +590,59 @@ export default function Users() {
         onConfirm={handleConfirmAction}
         onCancel={closeConfirmModal}
       />
+
+      {selectedPasswordRequest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-emerald-950/45 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-[1.75rem] border border-emerald-900/10 bg-[#fbfaf7] p-5 shadow-2xl shadow-emerald-950/25 sm:p-6">
+            <div className="flex items-start justify-between gap-4 border-b border-emerald-900/10 pb-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-lime-700/70">Password request</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight text-emerald-950">Set a new password</h2>
+                <p className="mt-2 text-sm text-emerald-900/60">{selectedPasswordRequest.email}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedPasswordRequest(null)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-900/10 bg-white text-emerald-900/65 transition hover:bg-emerald-50 hover:text-emerald-950"
+                aria-label="Close password request"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form className="mt-5 grid gap-4" onSubmit={handleResolvePasswordRequest}>
+              <label className="grid gap-2">
+                <span className="text-xs uppercase tracking-[0.28em] text-emerald-900/45">New password</span>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  minLength={6}
+                  required
+                  autoFocus
+                  className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm text-emerald-950 outline-none transition focus:border-lime-700/25"
+                />
+              </label>
+              <div className="flex justify-end gap-3 border-t border-emerald-900/10 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPasswordRequest(null)}
+                  className="rounded-2xl border border-emerald-900/10 bg-white px-4 py-3 text-sm font-medium text-emerald-900/70 transition hover:bg-emerald-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resolvingPasswordRequest}
+                  className="rounded-2xl bg-emerald-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-emerald-900 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {resolvingPasswordRequest ? 'Updating...' : 'Update password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-emerald-950/45 px-4 py-6 backdrop-blur-sm">

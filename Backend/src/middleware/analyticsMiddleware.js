@@ -60,6 +60,8 @@ export function validateAnalyticsQuery(req, res, next) {
   if (!Number.isInteger(limit) || limit < 1) limit = 10;
   if (limit > MAX_PAGE_SIZE) limit = MAX_PAGE_SIZE;
 
+  const order = req.query.order === "asc" ? "asc" : "desc";
+
   req.analyticsQuery = {
     from,
     to,
@@ -68,6 +70,7 @@ export function validateAnalyticsQuery(req, res, next) {
     sortBy,
     sortOrder,
     limit,
+    order,
     item: req.query.item ? String(req.query.item) : undefined,
     category: req.query.category ? String(req.query.category) : undefined,
   };

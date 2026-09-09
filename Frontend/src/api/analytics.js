@@ -10,8 +10,11 @@ export async function fetchSalesTrend(from, to) {
   return response.data;
 }
 
-export async function fetchTopItems(from, to, limit = 10) {
-  const response = await api.get('/analytics/topItems', { params: { from, to, limit } });
+export async function fetchTopItems(from, to, limit = 10, category = 'all', order = 'desc') {
+  const params = { from, to, limit, order };
+  if (category && category !== 'all') params.category = category;
+
+  const response = await api.get('/analytics/topItems', { params });
   return response.data;
 }
 

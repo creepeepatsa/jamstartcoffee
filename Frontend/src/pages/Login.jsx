@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import api from '../api/axios';
 import logoGreen from '../assets/logo_green.png'; // adjust this path if it errors
 
 function Login() {
@@ -10,6 +11,11 @@ function Login() {
 	const [error, setError] = useState('');
 	const [submitting, setSubmitting] = useState(false);
 	const [showPassword, setShowPassword] = useState(false);
+	const [showRequestForm, setShowRequestForm] = useState(false);
+	const [requestEmail, setRequestEmail] = useState('');
+	const [requestStatus, setRequestStatus] = useState('');
+	const [requestError, setRequestError] = useState('');
+	const [requesting, setRequesting] = useState(false);
 
 	const { login } = useAuth();
 	const navigate = useNavigate();
@@ -25,6 +31,23 @@ function Login() {
 			setError(err.response?.data?.error || 'Login failed. Please try again.');
 		} finally {
 			setSubmitting(false);
+		}
+	};
+
+	const handlePasswordChangeRequest = async (event) => {
+		event.preventDefault();
+		setRequesting(true);
+		setRequestError('');
+		setRequestStatus('');
+
+		try {
+			const response = await api.post('/auth/password-change-requests', { email: requestEmail });
+			setRequestStatus(response.data.message);
+			setRequestEmail('');
+		} catch (err) {
+			setRequestError(err.response?.data?.error || 'Unable to submit your request.');
+		} finally {
+			setRequesting(false);
 		}
 	};
 
@@ -108,6 +131,45 @@ function Login() {
 							)}
 						</button>
 					</form>
+
+					<div className="mt-6 border-t border-[#16281C]/10 pt-5">
+						<button
+							type="button"
+							onClick={() => {
+								setShowRequestForm((prev) => !prev);
+								setRequestError('');
+								setRequestStatus('');
+							}}
+							className="text-sm text-[#4B6A3B] underline decoration-[#6B8F4E]/40 underline-offset-4 transition hover:text-[#16281C]"
+						>
+							{showRequestForm ? 'Cancel password change request' : 'Request a password change'}
+						</button>
+
+						{showRequestForm && (
+							<form className="mt-4 space-y-4" onSubmit={handlePasswordChangeRequest}>
+								<p className="text-sm leading-6 text-[#4B6A3B]">
+									Enter your account email. An administrator will review the request and set a new password.
+								</p>
+								<input
+									type="email"
+									value={requestEmail}
+									onChange={(event) => setRequestEmail(event.target.value)}
+									placeholder="you@jamstartcoffee.com"
+									required
+									className="w-full border-0 border-b border-[#16281C]/15 bg-transparent pb-2 text-base text-[#16281C] outline-none transition placeholder:text-[#16281C]/30 focus:border-[#6B8F4E]"
+								/>
+								{requestError && <p className="text-sm text-red-700">{requestError}</p>}
+								{requestStatus && <p className="text-sm text-[#4B6A3B]">{requestStatus}</p>}
+								<button
+									type="submit"
+									disabled={requesting}
+									className="w-full border border-[#16281C]/15 px-5 py-3 text-sm font-medium text-[#16281C] transition hover:bg-[#F4F6EC] disabled:cursor-not-allowed disabled:opacity-60"
+								>
+									{requesting ? 'Sending request...' : 'Send request to an administrator'}
+								</button>
+							</form>
+						)}
+					</div>
 
 					<p className="mt-8 text-xs text-[#16281C]/45">
 						Secure access for your cafe's operations and forecasting tools.

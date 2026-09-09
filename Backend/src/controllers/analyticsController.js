@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { Prisma } from "@prisma/client";
 import axios from "axios";
 
 function monthKeyUTC(dateValue) {
@@ -44,9 +45,11 @@ export async function getSalesTrend(req, res) {
 
 export async function getTopItems(req, res) {
   try {
-    const { from, to, limit } = req.analyticsQuery;
+    const { from, to, limit, category, order } = req.analyticsQuery;
+    const categoryClause = category ? Prisma.sql`AND category = ${category}` : Prisma.empty;
+    const orderClause = order === "asc" ? Prisma.sql`ORDER BY revenue ASC` : Prisma.sql`ORDER BY revenue DESC`;
 
-    const rows = await prisma.$queryRaw`
+    const rows = await prisma.$queryRaw(Prisma.sql`
       SELECT
         item_name,
         category,
@@ -54,10 +57,11 @@ export async function getTopItems(req, res) {
         SUM("totalSales")::float AS revenue
       FROM "Sale"
       WHERE date >= ${from} AND date <= ${to}
+        ${categoryClause}
       GROUP BY item_name, category
-      ORDER BY revenue DESC
+      ${orderClause}
       LIMIT ${limit}
-    `;
+    `);
 
     res.json({
       range: { from, to },
