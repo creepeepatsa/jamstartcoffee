@@ -410,7 +410,7 @@ const buildItemPerformance = async (where) => {
 
 export const exportSales = async (req, res) => {
   try {
-    const { startDate, endDate, month, category, format = 'csv', reportType = 'sales_report' } = req.query;
+    const { startDate, endDate, month, category, format = 'csv', reportType = 'sales_report', preview } = req.query;
 
     // ── Validate reportType ──────────────────────────────
     if (!REPORT_TYPES.includes(reportType)) {
@@ -499,6 +499,10 @@ export const exportSales = async (req, res) => {
     // ── Validate there's actually something to export ──────────────────────────────
     if (!rows || rows.length === 0) {
       return res.status(404).json({ error: 'No sales records match the given filters' });
+    }
+
+    if (preview === 'true') {
+      return res.json({ reportType, columns, rows: rows.slice(0, 100), totalRows: rows.length });
     }
 
     if (format === 'xlsx') {

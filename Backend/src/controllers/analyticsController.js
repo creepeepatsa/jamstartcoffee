@@ -8,6 +8,10 @@ function monthKeyUTC(dateValue) {
   return `${year}-${month}`;
 }
 
+function yearKeyUTC(dateValue) {
+  return new Date(dateValue).getUTCFullYear();
+}
+
 export async function getSalesTrend(req, res) {
   try {
     const { from, to } = req.analyticsQuery;
@@ -116,6 +120,8 @@ export async function getKpiSummary(req, res) {
 
         const currentMonthStart = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), 1));
         const previousMonthStart = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - 1, 1));
+        const currentYearStart = new Date(Date.UTC(to.getUTCFullYear(), 0, 1));
+        const previousYearStart = new Date(Date.UTC(to.getUTCFullYear() - 1, 0, 1));
 
     const momPromise = prisma.$queryRaw`
       SELECT
@@ -127,7 +133,17 @@ export async function getKpiSummary(req, res) {
       ORDER BY month ASC
     `;
 
-    const [totalsRows, momRows] = await Promise.all([totalsPromise, momPromise]);
+    const yoyPromise = prisma.$queryRaw`
+      SELECT
+        date_trunc('year', date) AS year,
+        SUM("totalSales")::float AS revenue
+      FROM "Sale"
+      WHERE date >= ${previousYearStart} AND date <= ${to}
+      GROUP BY date_trunc('year', date)
+      ORDER BY year ASC
+    `;
+
+    const [totalsRows, momRows, yoyRows] = await Promise.all([totalsPromise, momPromise, yoyPromise]);
     const totals = totalsRows[0] || {};
 
     const currentMonthKey = monthKeyUTC(currentMonthStart);
@@ -139,10 +155,20 @@ export async function getKpiSummary(req, res) {
     const currentMonthRevenue = currentMonthRow?.revenue ?? 0;
     const previousMonthRevenue = previousMonthRow?.revenue ?? 0;
 
+    const currentYearRow = yoyRows.find((r) => yearKeyUTC(r.year) === currentYearStart.getUTCFullYear());
+    const previousYearRow = yoyRows.find((r) => yearKeyUTC(r.year) === previousYearStart.getUTCFullYear());
+    const currentYearRevenue = currentYearRow?.revenue ?? 0;
+    const previousYearRevenue = previousYearRow?.revenue ?? 0;
+
     let momChangePct = null;
     if (previousMonthRevenue > 0) {
       momChangePct =
         ((currentMonthRevenue - previousMonthRevenue) / previousMonthRevenue) * 100;
+    }
+
+    let yoyChangePct = null;
+    if (previousYearRevenue > 0) {
+      yoyChangePct = ((currentYearRevenue - previousYearRevenue) / previousYearRevenue) * 100;
     }
 
     res.json({
@@ -156,6 +182,13 @@ export async function getKpiSummary(req, res) {
         previousMonth: previousMonthStart,
         previousMonthRevenue,
         changePct: momChangePct,
+      },
+      yearOverYear: {
+        currentYear: currentYearStart,
+        currentYearRevenue,
+        previousYear: previousYearStart,
+        previousYearRevenue,
+        changePct: yoyChangePct,
       },
     });
   } catch (err) {

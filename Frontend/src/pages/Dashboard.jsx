@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Calendar, ChevronLeft, ChevronRight, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from 'lucide-react';
+import {
+  Activity,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Package,
+  RefreshCcw,
+  Sparkles,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+} from 'lucide-react';
 import {
   Area,
   Bar,
@@ -88,6 +99,16 @@ function getKpiRangeFromMonth(monthValue) {
   };
 }
 
+function getKpiRangeFromYear(yearValue) {
+  if (!/^\d{4}$/.test(yearValue)) return null;
+
+  const year = Number(yearValue);
+  return {
+    from: new Date(Date.UTC(year - 1, 0, 1)).toISOString(),
+    to: new Date(Date.UTC(year + 1, 0, 1) - 1).toISOString(),
+  };
+}
+
 function formatCurrency(value) {
   return currencyFormatter.format(Number(value) || 0);
 }
@@ -132,6 +153,67 @@ function EmptyState({ title, description }) {
   );
 }
 
+function YearPicker({ value, onChange }) {
+  const currentYear = new Date().getFullYear();
+  const selectedYear = Number(value) || currentYear;
+  const firstYear = Math.max(2000, selectedYear - 5);
+  const years = Array.from({ length: 11 }, (_, index) => firstYear + index);
+
+  return (
+    <details className="relative">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-2xl border border-emerald-900/10 bg-white px-3 py-2 text-sm text-emerald-950 shadow-sm shadow-emerald-950/5">
+        <Calendar className="h-4 w-4 shrink-0 text-emerald-900/45" />
+        <span>{value || 'Select year'}</span>
+      </summary>
+      <div className="absolute right-0 z-20 mt-2 w-56 rounded-2xl border border-emerald-900/10 bg-white p-3 shadow-lg shadow-emerald-950/10">
+        <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.2em] text-emerald-900/50">
+          <span>Year</span>
+          <span>{firstYear}-{firstYear + 10}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {years.map((year) => (
+            <button
+              key={year}
+              type="button"
+              onClick={() => onChange(String(year))}
+              className={`rounded-xl px-2 py-2 text-sm transition ${
+                year === selectedYear
+                  ? 'bg-emerald-700 font-semibold text-white'
+                  : 'text-emerald-950 hover:bg-emerald-50'
+              }`}
+            >
+              {year}
+            </button>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function KpiStatCard({ icon, label, value, sublabel, loading, error }) {
+  return (
+    <div className="rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] p-5 shadow-sm shadow-emerald-950/5 sm:p-6">
+      <div className="flex items-center gap-3">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs uppercase tracking-[0.35em] text-lime-700/70">{label}</p>
+          {error ? (
+            <p className="mt-1 text-sm text-rose-600">{error}</p>
+          ) : loading ? (
+            <p className="mt-1 text-lg font-semibold text-emerald-900/40">Loading...</p>
+          ) : (
+            <p className="mt-1 truncate text-2xl font-semibold text-emerald-950">{value}</p>
+          )}
+        </div>
+      </div>
+      {!error && !loading && sublabel && <p className="mt-3 text-sm text-emerald-900/55">{sublabel}</p>}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const name = user?.first_name || user?.name || 'there';
@@ -144,11 +226,13 @@ export default function Dashboard() {
   const [trendFrom, setTrendFrom] = useState(defaults.from);
   const [trendTo, setTrendTo] = useState(defaults.to);
   const [kpiMonth, setKpiMonth] = useState('');
+  const [kpiYear, setKpiYear] = useState('');
 
   const [trendData, setTrendData] = useState([]);
   const [topItemsData, setTopItemsData] = useState([]);
   const [categoryData, setCategoryData] = useState([]);
   const [kpiData, setKpiData] = useState(null);
+  const [yoyData, setYoyData] = useState(null);
 
   const [trendLoading, setTrendLoading] = useState(true);
   const [topItemsLoading, setTopItemsLoading] = useState(true);
@@ -159,13 +243,18 @@ export default function Dashboard() {
   const [topItemsError, setTopItemsError] = useState('');
   const [categoryError, setCategoryError] = useState('');
   const [kpiError, setKpiError] = useState('');
+  const [yoyError, setYoyError] = useState('');
 
   const requestRef = useRef(0);
+  const kpiMonthInitializedRef = useRef(false);
+  const kpiYearInitializedRef = useRef(false);
 
   const kpiRange = useMemo(() => {
     if (!kpiMonth) return { from, to };
     return getKpiRangeFromMonth(kpiMonth) || { from, to };
   }, [kpiMonth, from, to]);
+
+  const yoyRange = useMemo(() => getKpiRangeFromYear(kpiYear) || { from, to }, [kpiYear, from, to]);
 
   // Helper function to get month labels
   const getMonthLabels = useCallback(() => {
@@ -209,12 +298,14 @@ export default function Dashboard() {
     setTopItemsError('');
     setCategoryError('');
     setKpiError('');
+    setYoyError('');
 
-    const [trendResult, topItemsResult, categoryResult, kpiResult] = await Promise.allSettled([
+    const [trendResult, topItemsResult, categoryResult, kpiResult, yoyResult] = await Promise.allSettled([
       fetchSalesTrend(trendFrom, trendTo),
       fetchTopItems(from, to, 5),
       fetchCategoryBreakdown(from, to),
       fetchKpiSummary(kpiRange.from, kpiRange.to),
+      fetchKpiSummary(yoyRange.from, yoyRange.to),
     ]);
 
     if (requestId !== requestRef.current) return;
@@ -247,15 +338,44 @@ export default function Dashboard() {
       setKpiError(kpiResult.reason?.response?.data?.error || 'Unable to load month over month growth.');
     }
 
+    if (yoyResult.status === 'fulfilled') {
+      setYoyData(yoyResult.value || null);
+    } else {
+      setYoyData(null);
+      setYoyError(yoyResult.reason?.response?.data?.error || 'Unable to load year over year growth.');
+    }
+
     setTrendLoading(false);
     setTopItemsLoading(false);
     setCategoryLoading(false);
     setKpiLoading(false);
-  }, [trendFrom, trendTo, from, to, kpiRange]);
+  }, [trendFrom, trendTo, from, to, kpiRange, yoyRange]);
 
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
+
+  useEffect(() => {
+    if (kpiMonthInitializedRef.current || trendLoading || trendData.length === 0) return;
+
+    const latestMonthWithData = [...trendData].reverse()[0];
+    if (!latestMonthWithData?.month) return;
+
+    const latestMonth = new Date(latestMonthWithData.month);
+    const monthValue = `${latestMonth.getUTCFullYear()}-${String(latestMonth.getUTCMonth() + 1).padStart(2, '0')}`;
+    setKpiMonth(monthValue);
+    kpiMonthInitializedRef.current = true;
+  }, [trendData, trendLoading]);
+
+  useEffect(() => {
+    if (kpiYearInitializedRef.current || trendLoading || trendData.length === 0) return;
+
+    const latestEntryWithData = [...trendData].reverse().find((entry) => Number(entry.totalRevenue) > 0);
+    if (!latestEntryWithData?.month) return;
+
+    setKpiYear(String(new Date(latestEntryWithData.month).getUTCFullYear()));
+    kpiYearInitializedRef.current = true;
+  }, [trendData, trendLoading]);
 
   const trendChartData = useMemo(
     () =>
@@ -296,6 +416,35 @@ export default function Dashboard() {
     [categoryData]
   );
 
+  // KPI stat row totals — derived from the same trend series that the
+  // period buttons above the revenue chart already control.
+  const trendRangeDays = useMemo(() => {
+    const start = new Date(trendFrom);
+    const end = new Date(trendTo);
+    const diff = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+    return diff > 0 ? diff : 0;
+  }, [trendFrom, trendTo]);
+
+  const totalRevenue = useMemo(
+    () => trendChartData.reduce((sum, entry) => sum + entry.revenue, 0),
+    [trendChartData]
+  );
+
+  const totalUnitsSold = useMemo(
+    () => trendChartData.reduce((sum, entry) => sum + entry.units, 0),
+    [trendChartData]
+  );
+
+  const avgDailyRevenue = useMemo(
+    () => (trendRangeDays > 0 ? totalRevenue / trendRangeDays : 0),
+    [totalRevenue, trendRangeDays]
+  );
+
+  const trendPeriodLabel = useMemo(
+    () => periodOptions.find((option) => option.value === trendPeriod)?.label || 'Selected period',
+    [trendPeriod]
+  );
+
   const handleRefresh = () => {
     void loadOverview();
   };
@@ -306,6 +455,11 @@ export default function Dashboard() {
   const isGrowthPositive = momChangePct !== null && momChangePct >= 0;
   const currentMonthRevenue = kpiData?.monthOverMonth?.currentMonthRevenue ?? 0;
   const previousMonthRevenue = kpiData?.monthOverMonth?.previousMonthRevenue ?? 0;
+  const yoyChangePct = yoyData?.yearOverYear?.changePct ?? null;
+  const isYoyGrowthPositive = yoyChangePct !== null && yoyChangePct >= 0;
+  const currentYearRevenue = yoyData?.yearOverYear?.currentYearRevenue ?? 0;
+  const previousYearRevenue = yoyData?.yearOverYear?.previousYearRevenue ?? 0;
+  const selectedYear = kpiYear || String(new Date().getFullYear());
 
   const { current: currentLabel, previous: previousLabel } = getMonthLabels();
 
@@ -326,23 +480,7 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleRefresh}
-            className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-950 px-4 py-3 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-900"
-          >
-            <RefreshCcw className="h-4 w-4" />
-            Refresh data
-          </button>
-        </div>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-5">
-        <SectionCard
-          title="Revenue trend"
-          description="Revenue and units sold over time for the selected period."
-          className="xl:col-span-3"
-          action={
+          <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
             <div className="flex flex-wrap items-center gap-2">
               {periodOptions.map((option) => (
                 <button
@@ -361,7 +499,51 @@ export default function Dashboard() {
                 </button>
               ))}
             </div>
-          }
+
+            <button
+              type="button"
+              onClick={handleRefresh}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-950 px-4 py-3 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-900"
+            >
+              <RefreshCcw className="h-4 w-4" />
+              Refresh data
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <KpiStatCard
+          icon={<Wallet className="h-6 w-6" />}
+          label="Total sales"
+          value={formatCurrency(totalRevenue)}
+          sublabel={trendPeriodLabel}
+          loading={trendLoading}
+          error={trendError}
+        />
+        <KpiStatCard
+          icon={<Package className="h-6 w-6" />}
+          label="Total units sold"
+          value={formatNumber(totalUnitsSold)}
+          sublabel={trendPeriodLabel}
+          loading={trendLoading}
+          error={trendError}
+        />
+        <KpiStatCard
+          icon={<Activity className="h-6 w-6" />}
+          label="Average daily revenue"
+          value={formatCurrency(avgDailyRevenue)}
+          sublabel={trendRangeDays ? `Across ${trendRangeDays} days` : trendPeriodLabel}
+          loading={trendLoading}
+          error={trendError}
+        />
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-5">
+        <SectionCard
+          title="Revenue trend"
+          description="Revenue and units sold over time for the selected period."
+          className="xl:col-span-3"
         >
           {trendError ? (
             <EmptyState title="Trend chart unavailable" description={trendError} />
@@ -425,8 +607,8 @@ export default function Dashboard() {
         </SectionCard>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-5">
-        <SectionCard title="Item revenue share" description="Revenue share by product for the selected period." className="xl:col-span-3">
+      <div className="grid gap-6 xl:grid-cols-6">
+        <SectionCard title="Item revenue share" description="Revenue share by product for the selected period." className="xl:col-span-2">
           {topItemsError ? (
             <EmptyState title="Item revenue share unavailable" description={topItemsError} />
           ) : topItemsLoading ? (
@@ -514,6 +696,66 @@ export default function Dashboard() {
                 <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
                   <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{previousLabel}</p>
                   <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(previousMonthRevenue)}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Year over year growth"
+          description="Selected year revenue vs previous year."
+          className="xl:col-span-2"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <YearPicker value={kpiYear} onChange={setKpiYear} />
+
+              {kpiYear && (
+                <button
+                  type="button"
+                  onClick={() => setKpiYear('')}
+                  className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2 text-xs font-medium uppercase tracking-[0.2em] text-emerald-900/60 transition hover:bg-emerald-50 hover:text-emerald-950"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          }
+        >
+          {yoyError ? (
+            <EmptyState title="Growth data unavailable" description={yoyError} />
+          ) : kpiLoading ? (
+            <div className="flex min-h-[22rem] items-center justify-center rounded-[1.25rem] border border-dashed border-emerald-900/10 bg-white text-sm text-emerald-900/55">
+              Loading growth data...
+            </div>
+          ) : yoyChangePct === null ? (
+            <EmptyState title="Not enough data" description="Previous year has no recorded sales to compare against." />
+          ) : (
+            <div className="flex h-[22rem] flex-col justify-center gap-6">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`flex h-14 w-14 items-center justify-center rounded-2xl ${
+                    isYoyGrowthPositive ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-600'
+                  }`}
+                >
+                  {isYoyGrowthPositive ? <TrendingUp className="h-7 w-7" /> : <TrendingDown className="h-7 w-7" />}
+                </div>
+                <div>
+                  <p className={`text-3xl font-semibold ${isYoyGrowthPositive ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {formatPercent(yoyChangePct)}
+                  </p>
+                  <p className="text-sm text-emerald-900/60">vs. previous year</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{selectedYear}</p>
+                  <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(currentYearRevenue)}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-900/10 bg-white p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-emerald-900/50">{Number(selectedYear) - 1}</p>
+                  <p className="mt-1 text-lg font-semibold text-emerald-950">{formatCurrency(previousYearRevenue)}</p>
                 </div>
               </div>
             </div>

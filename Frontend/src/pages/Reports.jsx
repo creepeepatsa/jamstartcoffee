@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { BarChart3, Calendar, ClipboardList, Download, FileText, Package } from 'lucide-react';
+import { BarChart3, Calendar, ClipboardList, Download, Eye, FileText, Package, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import api from '../api/axios';
+import ConfirmModal from '../components/ConfirmModal';
 
 const reportTypes = [
   {
@@ -61,6 +62,9 @@ export default function Reports() {
   const [category, setCategory] = useState('all');
   const [categories, setCategories] = useState([{ label: 'All categories', value: 'all' }]);
   const [loading, setLoading] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [confirmExport, setConfirmExport] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -80,25 +84,49 @@ export default function Reports() {
     loadCategories();
   }, []);
 
+  const getReportParams = (includeFormat = true) => {
+    const params = { reportType };
+    const bounds = monthBounds(month);
+
+    if (includeFormat) {
+      params.format = format;
+    }
+
+    if (bounds) {
+      params.startDate = bounds.start;
+      params.endDate = bounds.end;
+    }
+
+    if (category !== 'all') {
+      params.category = category;
+    }
+
+    return params;
+  };
+
+  const openPreview = async () => {
+    setPreviewLoading(true);
+    setError('');
+
+    try {
+      const response = await api.get('/sales/export', {
+        params: { ...getReportParams(false), preview: 'true' },
+      });
+      setPreview(response.data);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Unable to load the report preview right now.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const generateReport = async () => {
     setLoading(true);
     setError('');
 
     try {
-      const params = { format, reportType };
-      const bounds = monthBounds(month);
-
-      if (bounds) {
-        params.startDate = bounds.start;
-        params.endDate = bounds.end;
-      }
-
-      if (category !== 'all') {
-        params.category = category;
-      }
-
       const response = await api.get('/sales/export', {
-        params,
+        params: getReportParams(),
         responseType: 'blob',
       });
 
@@ -111,6 +139,8 @@ export default function Reports() {
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
+      setConfirmExport(false);
+      setPreview(null);
     } catch (err) {
       setError(err.response?.data?.error || 'Unable to generate report right now.');
     } finally {
@@ -242,14 +272,86 @@ export default function Reports() {
 
         <button
           type="button"
-          onClick={generateReport}
-          disabled={loading}
+          onClick={openPreview}
+          disabled={previewLoading}
           className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-950 px-4 py-3 text-sm font-medium text-white shadow-sm shadow-emerald-950/10 transition hover:bg-emerald-900 disabled:cursor-not-allowed disabled:opacity-60 lg:w-auto lg:px-8"
         >
-          <Download className="h-4 w-4" />
-          {loading ? 'Generating...' : 'Generate report'}
+          <Eye className="h-4 w-4" />
+          {previewLoading ? 'Loading preview...' : 'Preview report'}
         </button>
       </section>
+
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-emerald-950/45 px-4 py-6 backdrop-blur-sm">
+          <div className="flex max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-[1.75rem] border border-emerald-900/10 bg-[#fbfaf7] shadow-2xl shadow-emerald-950/25">
+            <div className="flex items-start justify-between gap-4 border-b border-emerald-900/10 px-5 py-4 sm:px-6">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-lime-700/70">Report preview</p>
+                <h2 className="mt-1 text-2xl font-semibold tracking-tight text-emerald-950">
+                  {reportTypes.find((type) => type.key === preview.reportType)?.name || 'Report'}
+                </h2>
+                <p className="mt-1 text-sm text-emerald-900/60">{preview.totalRows} rows will be included.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-emerald-900/10 bg-white text-emerald-900/65 transition hover:bg-emerald-50 hover:text-emerald-950"
+                aria-label="Close preview"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="overflow-auto p-5 sm:p-6">
+              <table className="min-w-full border-separate border-spacing-0 text-left text-sm">
+                <thead>
+                  <tr>
+                    {preview.columns.map((column) => (
+                      <th key={column.key} className="sticky top-0 border-b border-emerald-900/15 bg-[#fbfaf7] px-3 py-3 font-semibold text-emerald-950">
+                        {column.header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.rows.slice(0, 100).map((row, rowIndex) => (
+                    <tr key={`${rowIndex}-${preview.reportType}`} className="even:bg-emerald-950/[0.03]">
+                      {preview.columns.map((column) => (
+                        <td key={column.key} className="whitespace-nowrap border-b border-emerald-900/10 px-3 py-3 text-emerald-900/75">
+                          {row[column.key] ?? '-'}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {preview.totalRows > 100 && <p className="mt-4 text-xs text-emerald-900/55">Showing the first 100 rows. The export will include all {preview.totalRows} rows.</p>}
+            </div>
+
+            <div className="flex flex-col-reverse gap-3 border-t border-emerald-900/10 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+              <button type="button" onClick={() => setPreview(null)} className="rounded-2xl border border-emerald-900/10 bg-white px-5 py-3 text-sm font-medium text-emerald-900/70 transition hover:bg-emerald-50">
+                Close preview
+              </button>
+              <button type="button" onClick={() => setConfirmExport(true)} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-950 px-5 py-3 text-sm font-medium text-white transition hover:bg-emerald-900">
+                <Download className="h-4 w-4" />
+                Export {format.toUpperCase()}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ConfirmModal
+        open={confirmExport}
+        title="Export this report?"
+        description={`This will download the ${format.toUpperCase()} version of the current ${reportTypes.find((type) => type.key === reportType)?.name || 'report'} using the selected filters.`}
+        confirmLabel="Export report"
+        confirmIcon={Download}
+        intent="success"
+        loading={loading}
+        onConfirm={generateReport}
+        onCancel={() => setConfirmExport(false)}
+      />
     </section>
   );
 }
