@@ -566,11 +566,24 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={salesTrendChartData} margin={{ top: 10, right: 12, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
-                  <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} width={56} />
+                  <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
+                  <YAxis tickLine={false} axisLine={false} width={70} fontSize={12} />
                   <Tooltip formatter={(value) => formatCurrency(value)} labelStyle={{ color: '#14532d', fontWeight: 600 }} />
-                  <Legend />
-                  <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#14532d" strokeWidth={2.5} dot={false} />
+                  <Legend
+                    verticalAlign="top"
+                    align="right"
+                    iconType="plainline"
+                    wrapperStyle={{ fontSize: 12, color: '#14532d', paddingBottom: 8 }}
+                  />
+                  <Line
+                    type="linear"
+                    dataKey="revenue"
+                    name="Revenue"
+                    stroke="#14532d"
+                    strokeWidth={2.5}
+                    dot={{ r: 3, fill: '#fbfaf7', strokeWidth: 2 }}
+                    activeDot={{ r: 5 }}
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -600,11 +613,24 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={demandTrendChartData} margin={{ top: 10, right: 12, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#d9e7d8" />
-                  <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} width={56} />
+                  <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={12} />
+                  <YAxis tickLine={false} axisLine={false} width={56} fontSize={12} />
                   <Tooltip formatter={(value) => formatNumber(value)} labelStyle={{ color: '#14532d', fontWeight: 600 }} />
-                  <Legend />
-                  <Line type="monotone" dataKey="units" name="Units sold" stroke="#84cc16" strokeWidth={2.5} dot={false} />
+                  <Legend
+                    verticalAlign="top"
+                    align="right"
+                    iconType="plainline"
+                    wrapperStyle={{ fontSize: 12, color: '#14532d', paddingBottom: 8 }}
+                  />
+                  <Line
+                    type="linear"
+                    dataKey="units"
+                    name="Units sold"
+                    stroke="#65a30d"
+                    strokeWidth={2.5}
+                    dot={{ r: 3, fill: '#fbfaf7', strokeWidth: 2 }}
+                    activeDot={{ r: 5 }}
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>
