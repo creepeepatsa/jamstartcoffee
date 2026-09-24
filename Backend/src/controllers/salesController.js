@@ -288,8 +288,8 @@ const buildMoMReport = (sales) => {
   for (const sale of sales) {
     const key = monthKey(sale.date);
     const existing = byMonth.get(key) || { totalSales: 0, items_sold: 0 };
-    existing.totalSales += sale.totalSales;
-    existing.items_sold += sale.items_sold;
+    existing.totalSales += Number(sale.totalSales);
+    existing.items_sold += Number(sale.items_sold);
     byMonth.set(key, existing);
   }
 
@@ -331,8 +331,8 @@ const buildYoYReport = (sales, month) => {
 
     const year = sale.date.getUTCFullYear();
     const existing = byYear.get(year) || { totalSales: 0, items_sold: 0 };
-    existing.totalSales += sale.totalSales;
-    existing.items_sold += sale.items_sold;
+    existing.totalSales += Number(sale.totalSales);
+    existing.items_sold += Number(sale.items_sold);
     byYear.set(year, existing);
   }
 
