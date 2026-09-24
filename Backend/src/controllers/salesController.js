@@ -461,7 +461,7 @@ export const exportSales = async (req, res) => {
       return res.status(400).json({ error: 'startDate cannot be after endDate' });
     }
 
-    const where = {};
+    const where = { archivedAt: null };
     if (parsedStart || parsedEnd) {
       where.date = {};
       if (parsedStart) where.date.gte = parsedStart;
@@ -534,11 +534,94 @@ export const exportSales = async (req, res) => {
   }
 };
 
+const parseSalePayload = (payload, partial = false) => {
+  const values = {};
+  if (!partial || payload.date !== undefined) {
+    const date = new Date(payload.date);
+    if (!payload.date || Number.isNaN(date.getTime())) throw new Error('Date must be valid');
+    values.date = date;
+  }
+  if (!partial || payload.item_name !== undefined) {
+    values.item_name = String(payload.item_name || '').trim();
+    if (!values.item_name) throw new Error('Item name is required');
+  }
+  if (!partial || payload.category !== undefined) {
+    values.category = String(payload.category || '').trim();
+    if (!values.category) throw new Error('Category is required');
+  }
+  if (!partial || payload.net_price !== undefined) {
+    values.net_price = Number(payload.net_price);
+    if (!Number.isFinite(values.net_price) || values.net_price < 0) throw new Error('Net price must be a non-negative number');
+  }
+  if (!partial || payload.items_sold !== undefined) {
+    values.items_sold = Number(payload.items_sold);
+    if (!Number.isInteger(values.items_sold) || values.items_sold < 0) throw new Error('Items sold must be a non-negative whole number');
+  }
+  if (!partial || payload.totalSales !== undefined) {
+    values.totalSales = Number(payload.totalSales);
+    if (!Number.isFinite(values.totalSales) || values.totalSales < 0) throw new Error('Total sales must be a non-negative number');
+  } else if (values.net_price !== undefined && values.items_sold !== undefined) {
+    values.totalSales = Number((values.net_price * values.items_sold).toFixed(2));
+  }
+  return values;
+};
+
+export const createSale = async (req, res) => {
+  try {
+    const data = parseSalePayload(req.body);
+    const sale = await prisma.sale.create({ data });
+    queueActivity(res, { actor: req.user?.email || 'unknown', action: `Created sale record ${sale.id}` });
+    res.status(201).json({ sale });
+  } catch (error) {
+    res.status(400).json({ error: error.message || 'Unable to create sale record' });
+  }
+};
+
+export const updateSale = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid sale id' });
+    const data = parseSalePayload(req.body, true);
+    const sale = await prisma.sale.update({ where: { id }, data });
+    queueActivity(res, { actor: req.user?.email || 'unknown', action: `Updated sale record ${id}` });
+    res.json({ sale });
+  } catch (error) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Sale record not found' });
+    res.status(400).json({ error: error.message || 'Unable to update sale record' });
+  }
+};
+
+export const archiveSale = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid sale id' });
+    const sale = await prisma.sale.update({ where: { id }, data: { archivedAt: new Date(), archivedBy: req.user?.email || 'unknown' } });
+    queueActivity(res, { actor: req.user?.email || 'unknown', action: `Archived sale record ${id}` });
+    res.json({ sale });
+  } catch (error) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Sale record not found' });
+    res.status(400).json({ error: 'Unable to archive sale record' });
+  }
+};
+
+export const restoreSale = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid sale id' });
+    const sale = await prisma.sale.update({ where: { id }, data: { archivedAt: null, archivedBy: null } });
+    queueActivity(res, { actor: req.user?.email || 'unknown', action: `Restored sale record ${id}` });
+    res.json({ sale });
+  } catch (error) {
+    if (error.code === 'P2025') return res.status(404).json({ error: 'Sale record not found' });
+    res.status(400).json({ error: 'Unable to restore sale record' });
+  }
+};
+
 export const getSalesTable = async (req, res) => {
   try {
-    const { startDate, endDate, month, category, item, page = 1, limit = 50 } = req.query;
+    const { startDate, endDate, month, category, item, page = 1, limit = 50, archived = 'false' } = req.query;
 
-    const where = {};
+    const where = { archivedAt: archived === 'true' ? { not: null } : null };
 
     const monthRange = parseMonthRange(month);
     if (month && !monthRange) {
@@ -586,30 +669,20 @@ export const getSalesTable = async (req, res) => {
       return res.status(400).json({ error: 'limit must be between 1 and 200' });
     }
 
-    const grouped = await prisma.sale.groupBy({
-      by: ['item_name', 'date', 'category'],
-      where,
-      _sum: {
-        items_sold: true,
-        totalSales: true,
-      },
-      _avg: {
-        net_price: true,
-      },
-      orderBy: [{ date: 'desc' }, { item_name: 'asc' }],
-    });
+    const [rows, totalRows] = await Promise.all([
+      prisma.sale.findMany({ where, orderBy: [{ date: 'desc' }, { item_name: 'asc' }], skip: (pageNum - 1) * limitNum, take: limitNum }),
+      prisma.sale.count({ where }),
+    ]);
 
-    const totalRows = grouped.length;
-    const startIndex = (pageNum - 1) * limitNum;
-    const paginated = grouped.slice(startIndex, startIndex + limitNum);
-
-    const formatted = paginated.map((row) => ({
+    const formatted = rows.map((row) => ({
+      id: row.id,
       item_name: row.item_name,
       category: row.category,
       month: row.date.toISOString().split('T')[0],
-      net_price: row._avg.net_price,
-      items_sold: row._sum.items_sold,
-      totalSales: row._sum.totalSales,
+      net_price: Number(row.net_price),
+      items_sold: row.items_sold,
+      totalSales: Number(row.totalSales),
+      archivedAt: row.archivedAt,
     }));
 
     res.json({
@@ -629,6 +702,7 @@ export const getSalesTable = async (req, res) => {
 export const getCategories = async (req, res) => {
   try {
     const categories = await prisma.sale.findMany({
+      where: { archivedAt: null },
       distinct: ['category'],
       select: { category: true },
       orderBy: { category: 'asc' },
@@ -638,5 +712,21 @@ export const getCategories = async (req, res) => {
   } catch (error) {
     console.error('Get categories error:', error);
     res.status(500).json({ error: 'Failed to fetch categories' });
+  }
+};
+
+export const getItems = async (req, res) => {
+  try {
+    const items = await prisma.sale.findMany({
+      where: { archivedAt: null },
+      distinct: ['item_name'],
+      select: { item_name: true },
+      orderBy: { item_name: 'asc' },
+    });
+
+    res.json({ items: items.map((item) => item.item_name) });
+  } catch (error) {
+    console.error('Get items error:', error);
+    res.status(500).json({ error: 'Failed to fetch items' });
   }
 };

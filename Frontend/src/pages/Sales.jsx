@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BarChart3, Calendar, ClipboardList, Download, Package, RefreshCcw, Upload } from 'lucide-react';
+import { Archive, BarChart3, Calendar, ClipboardList, Download, Package, Pencil, Plus, RefreshCcw, RotateCcw, Upload } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import api from '../api/axios';
 import { useAuth } from '../context/AuthContext';
 import Table from '../components/Table';
 import Dropdown from '../components/Dropdown';
+import ConfirmModal from '../components/ConfirmModal';
 
 const pageSizeOptions = [
   { label: '25 per page', value: 25 },
@@ -21,6 +22,7 @@ const formatCurrency = (value) =>
   new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(Number(value) || 0);
 
 const emptyImportSummary = null;
+const emptySale = { date: '', item_name: '', category: '', net_price: '', items_sold: '', totalSales: '' };
 
 export default function Sales() {
   const navigate = useNavigate();
@@ -33,11 +35,13 @@ export default function Sales() {
   const [success, setSuccess] = useState('');
 
   const [categoryOptions, setCategoryOptions] = useState([{ label: 'All categories', value: 'all' }]);
+  const [itemOptions, setItemOptions] = useState([]);
 
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [category, setCategory] = useState('all');
   const [month, setMonth] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
 
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(50);
@@ -47,6 +51,11 @@ export default function Sales() {
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importSummary, setImportSummary] = useState(emptyImportSummary);
+  const [saleFormOpen, setSaleFormOpen] = useState(false);
+  const [editingSale, setEditingSale] = useState(null);
+  const [saleForm, setSaleForm] = useState(emptySale);
+  const [savingSale, setSavingSale] = useState(false);
+  const [pendingArchive, setPendingArchive] = useState(null);
   const fileInputRef = useRef(null);
   const latestRequestRef = useRef(0);
   const activeCategoryLabel = categoryOptions.find((option) => option.value === category)?.label || category;
@@ -71,6 +80,12 @@ export default function Sales() {
     loadCategories();
   }, []);
 
+  useEffect(() => {
+    api.get('/sales/items')
+      .then((response) => setItemOptions(response.data.items || []))
+      .catch(() => setItemOptions([]));
+  }, []);
+
   // Debounce the search input before it becomes the actual query param —
   // otherwise every keystroke would fire a new request to the backend
   useEffect(() => {
@@ -91,7 +106,7 @@ export default function Sales() {
     setError('');
 
     try {
-      const params = { page, limit };
+      const params = { page, limit, archived: showArchived };
 
       if (searchTerm) params.item = searchTerm;
       if (category !== 'all') params.category = category;
@@ -114,7 +129,7 @@ export default function Sales() {
 
       setLoading(false);
     }
-  }, [page, limit, searchTerm, category, month]);
+  }, [page, limit, searchTerm, category, month, showArchived]);
 
   useEffect(() => {
     loadSales();
@@ -201,6 +216,78 @@ export default function Sales() {
     }
   };
 
+  const openCreateSale = () => {
+    setEditingSale(null);
+    setSaleForm({ ...emptySale, date: new Date().toISOString().slice(0, 10) });
+    setSaleFormOpen(true);
+    setError('');
+  };
+
+  const openEditSale = (sale) => {
+    setEditingSale(sale);
+    setSaleForm({
+      date: sale.month,
+      item_name: sale.item_name,
+      category: sale.category,
+      net_price: sale.net_price,
+      items_sold: sale.items_sold,
+      totalSales: sale.totalSales,
+    });
+    setSaleFormOpen(true);
+    setError('');
+  };
+
+  const handleSaleFormChange = (event) => {
+    const { name, value } = event.target;
+    setSaleForm((current) => {
+      const next = { ...current, [name]: value };
+      if (name === 'net_price' || name === 'items_sold') {
+        const price = Number(name === 'net_price' ? value : next.net_price);
+        const units = Number(name === 'items_sold' ? value : next.items_sold);
+        next.totalSales = Number.isFinite(price) && Number.isFinite(units) ? (price * units).toFixed(2) : '';
+      }
+      return next;
+    });
+  };
+
+  const handleSaveSale = async (event) => {
+    event.preventDefault();
+    setSavingSale(true);
+    setError('');
+    try {
+      const path = editingSale ? `/sales/${editingSale.id}` : '/sales';
+      const response = editingSale ? await api.put(path, saleForm) : await api.post(path, saleForm);
+      setSuccess(editingSale ? 'Sale record updated.' : 'Sale record created.');
+      setSaleFormOpen(false);
+      setEditingSale(null);
+      await loadSales();
+      if (!editingSale && response.data?.sale?.category && !categoryOptions.some((option) => option.value === response.data.sale.category)) {
+        setCategoryOptions((options) => [...options, { label: response.data.sale.category, value: response.data.sale.category }]);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Unable to save sale record.');
+    } finally {
+      setSavingSale(false);
+    }
+  };
+
+  const handleArchiveRestore = async () => {
+    if (!pendingArchive) return;
+    const { sale, restore } = pendingArchive;
+    setSavingSale(true);
+    setError('');
+    try {
+      await api.patch(`/sales/${sale.id}/${restore ? 'restore' : 'archive'}`);
+      setSuccess(restore ? 'Sale record restored.' : 'Sale record archived.');
+      setPendingArchive(null);
+      await loadSales();
+    } catch (err) {
+      setError(err.response?.data?.error || `Unable to ${restore ? 'restore' : 'archive'} sale record.`);
+    } finally {
+      setSavingSale(false);
+    }
+  };
+
   const columns = [
     {
       key: 'item_name',
@@ -238,6 +325,30 @@ export default function Sales() {
       header: 'Total Sales',
       align: 'right',
       render: (row) => <span className="font-medium text-emerald-950">{formatCurrency(row.totalSales)}</span>,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'right',
+      render: (row) => (
+        <div className="flex justify-end gap-1">
+          {!showArchived && (
+            <>
+              <button type="button" onClick={() => openEditSale(row)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-emerald-700 transition hover:bg-emerald-50" title="Edit sale" aria-label={`Edit ${row.item_name}`}>
+                <Pencil className="h-4 w-4" />
+              </button>
+              <button type="button" onClick={() => setPendingArchive({ sale: row, restore: false })} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-rose-600 transition hover:bg-rose-50" title="Archive sale" aria-label={`Archive ${row.item_name}`}>
+                <Archive className="h-4 w-4" />
+              </button>
+            </>
+          )}
+          {showArchived && (
+            <button type="button" onClick={() => setPendingArchive({ sale: row, restore: true })} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-emerald-700 transition hover:bg-emerald-50" title="Restore sale" aria-label={`Restore ${row.item_name}`}>
+              <RotateCcw className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      ),
     },
   ];
 
@@ -302,6 +413,26 @@ export default function Sales() {
               className="hidden"
               onChange={handleFileSelected}
             />
+            {isAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={openCreateSale}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-emerald-800 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add sale
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowArchived((value) => !value); setPage(1); }}
+                  className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm font-medium transition ${showArchived ? 'border-emerald-800 bg-emerald-50 text-emerald-800' : 'border-emerald-900/10 bg-white text-emerald-900/80 hover:bg-emerald-50'}`}
+                >
+                  {showArchived ? <RotateCcw className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+                  {showArchived ? 'Active sales' : 'Archived sales'}
+                </button>
+              </>
+            )}
             {isAdmin && (
               <button
                 type="button"
@@ -446,6 +577,72 @@ export default function Sales() {
           </button>
         </div>
       </div>
+
+      {saleFormOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-emerald-950/45 px-4 py-6 backdrop-blur-sm">
+          <form onSubmit={handleSaveSale} className="w-full max-w-4xl rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] p-6 shadow-2xl shadow-emerald-950/25 sm:p-10">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-lime-700/70">Sales record</p>
+                <h2 className="mt-2 text-2xl font-semibold text-emerald-950">{editingSale ? 'Edit sale' : 'Add sale'}</h2>
+              </div>
+              <button type="button" onClick={() => setSaleFormOpen(false)} className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2 text-sm text-emerald-900/60">Cancel</button>
+            </div>
+            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+              {[
+                ['date', 'Date', 'date'],
+                ['item_name', 'Item name', 'text'],
+                ['category', 'Category', 'text'],
+                ['net_price', 'Net price', 'number'],
+                ['items_sold', 'Items sold', 'number'],
+                ['totalSales', 'Total sales', 'number'],
+              ].map(([name, label, type]) => (
+                <label key={name} className="grid gap-2 text-sm font-medium text-emerald-900/75">
+                  {label}
+                  {name === 'item_name' ? (
+                    <select name={name} value={saleForm[name]} onChange={handleSaleFormChange} required className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2.5 text-sm text-emerald-950 outline-none focus:border-emerald-700/40 focus:ring-2 focus:ring-emerald-700/10">
+                      <option value="">Select an existing item</option>
+                      {itemOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  ) : name === 'category' ? (
+                    <select name={name} value={saleForm[name]} onChange={handleSaleFormChange} required className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2.5 text-sm text-emerald-950 outline-none focus:border-emerald-700/40 focus:ring-2 focus:ring-emerald-700/10">
+                      <option value="">Select an existing category</option>
+                      {categoryOptions.filter((option) => option.value !== 'all').map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      name={name}
+                      type={type}
+                      min={type === 'number' ? '0' : undefined}
+                      step={name === 'items_sold' ? '1' : '0.01'}
+                      value={saleForm[name]}
+                      onChange={handleSaleFormChange}
+                      readOnly={name === 'totalSales'}
+                      required
+                      className="rounded-xl border border-emerald-900/10 bg-white px-3 py-2.5 text-sm text-emerald-950 outline-none focus:border-emerald-700/40 focus:ring-2 focus:ring-emerald-700/10 read-only:bg-emerald-50"
+                    />
+                  )}
+                </label>
+              ))}
+            </div>
+            <button type="submit" disabled={savingSale} className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-800 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60">
+              {savingSale ? 'Saving...' : editingSale ? 'Save changes' : 'Create sale'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      <ConfirmModal
+        open={Boolean(pendingArchive)}
+        title={pendingArchive?.restore ? 'Restore sale record?' : 'Archive sale record?'}
+        description={pendingArchive?.restore ? 'This sale will return to the active sales list.' : 'This sale will be hidden from the active sales list but can be restored later.'}
+        confirmLabel={pendingArchive?.restore ? 'Restore sale' : 'Archive sale'}
+        confirmIcon={pendingArchive?.restore ? RotateCcw : Archive}
+        intent={pendingArchive?.restore ? 'success' : 'danger'}
+        loading={savingSale}
+        onConfirm={handleArchiveRestore}
+        onCancel={() => setPendingArchive(null)}
+      />
     </section>
   );
 }

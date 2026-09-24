@@ -41,9 +41,12 @@ model Sale {
   net_price  Decimal  @db.Decimal(10, 2)
   items_sold   Int
   totalSales Decimal  @db.Decimal(10, 2)
+  archivedAt DateTime?
+  archivedBy String?
 
   @@index([date])
   @@index([item_name])
+  @@index([archivedAt])
 }
 
 model Log {
