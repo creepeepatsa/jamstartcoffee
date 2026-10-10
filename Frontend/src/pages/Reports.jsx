@@ -215,10 +215,43 @@ function drawChart(pdf, rows, key, x, y, width, height, color, label) {
 }
 
 const formatPercent = (value) => {
-  if (value === null || value === undefined || value === "" || value === "N/A") return "â€”";
+  if (value === null || value === undefined || value === "" || value === "N/A") return "-";
   const numericValue = Number.parseFloat(String(value).replace("%", ""));
-  return Number.isFinite(numericValue) ? `${numericValue.toFixed(1)}%` : "â€”";
+  return Number.isFinite(numericValue) ? `${numericValue.toFixed(1)}%` : "-";
 };
+
+function buildReportForecastRows(revenueForecast, demandForecast, selectedRows) {
+  const monthKey = (value) => {
+    if (/^\d{4}-\d{2}$/.test(String(value))) return String(value);
+    const parsed = new Date(`${value} 1`);
+    return Number.isNaN(parsed.getTime())
+      ? String(value)
+      : `${parsed.getUTCFullYear()}-${String(parsed.getUTCMonth() + 1).padStart(2, "0")}`;
+  };
+  const actualRows = new Map(
+    (selectedRows || []).map((row) => [
+      monthKey(row.month),
+      {
+        month: monthKey(row.month),
+        actualValue: Number(row.totalSales || 0),
+        actualUnits: Number(row.items_sold || 0),
+        predictedValue: Number(row.totalSales || 0),
+        predictedUnits: Number(row.items_sold || 0),
+        isActual: true,
+      },
+    ]),
+  );
+  const futureRows = (revenueForecast.forecast || []).map((row, index) => ({
+    ...row,
+    predictedUnits: demandForecast.forecast?.[index]?.predictedValue ?? 0,
+    isActual: false,
+  }));
+
+  return [
+    ...actualRows.values(),
+    ...futureRows.filter((row) => !actualRows.has(row.month)),
+  ];
+}
 
 function makeTemplatePdf(report, subtitle) {
   const pdf = new jsPDF({ unit: "mm" });
@@ -292,7 +325,9 @@ function makeTemplatePdf(report, subtitle) {
     y += blockHeight;
   };
   const insight = (value) => {
-    const lines = pdf.splitTextToSize(value, contentWidth - 10);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8.2);
+    const lines = pdf.splitTextToSize(String(value), contentWidth - 12);
     const boxHeight = Math.max(20, lines.length * 4.1 + 11);
     if (y + boxHeight > height - 20) {
       pdf.addPage();
@@ -305,9 +340,7 @@ function makeTemplatePdf(report, subtitle) {
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(7.5);
     pdf.text("INSIGHT", margin + 4, y + 6);
-    pdf.setFont("helvetica", "normal");
     pdf.setTextColor(...colors.ink);
-    pdf.setFontSize(8.2);
     pdf.text(lines, margin + 4, y + 12);
     y += boxHeight + 10;
   };
@@ -473,7 +506,7 @@ function makeTemplatePdf(report, subtitle) {
   pdf.setTextColor(...colors.ink);
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(19);
-  pdf.text("Jamstart Coffee â€” Sales & Demand Analytics", margin, y);
+  pdf.text("Jamstart Coffee - Sales & Demand Analytics", margin, y);
   y += 8;
   pdf.setFontSize(14);
   pdf.text("Report", margin, y);
@@ -500,25 +533,25 @@ function makeTemplatePdf(report, subtitle) {
       {
         metric: "Top Item by Sales",
         value: itemBySales[0]
-          ? `${itemBySales[0].item_name || itemBySales[0].item} â€” ${peso(itemBySales[0].totalSales)}`
+          ? `${itemBySales[0].item_name || itemBySales[0].item} - ${peso(itemBySales[0].totalSales)}`
           : "No item data",
       },
       {
         metric: "Least Item by Sales",
         value: itemBySales.at(-1)
-          ? `${itemBySales.at(-1).item_name || itemBySales.at(-1).item} â€” ${peso(itemBySales.at(-1).totalSales)}`
+          ? `${itemBySales.at(-1).item_name || itemBySales.at(-1).item} - ${peso(itemBySales.at(-1).totalSales)}`
           : "No item data",
       },
       {
         metric: "Top Item by Units Sold",
         value: itemByUnits[0]
-          ? `${itemByUnits[0].item_name || itemByUnits[0].item} â€” ${num(itemByUnits[0].items_sold)}`
+          ? `${itemByUnits[0].item_name || itemByUnits[0].item} - ${num(itemByUnits[0].items_sold)}`
           : "No item data",
       },
       {
         metric: "Least Item by Units Sold",
         value: itemByUnits.at(-1)
-          ? `${itemByUnits.at(-1).item_name || itemByUnits.at(-1).item} â€” ${num(itemByUnits.at(-1).items_sold)}`
+          ? `${itemByUnits.at(-1).item_name || itemByUnits.at(-1).item} - ${num(itemByUnits.at(-1).items_sold)}`
           : "No item data",
       },
     ],
@@ -541,25 +574,25 @@ function makeTemplatePdf(report, subtitle) {
       {
         metric: "Top Category by Sales",
         value: categoryBySales[0]
-          ? `${categoryBySales[0].category} â€” ${peso(categoryBySales[0].totalSales)}`
+          ? `${categoryBySales[0].category} - ${peso(categoryBySales[0].totalSales)}`
           : "No category data",
       },
       {
         metric: "Least Category by Sales",
         value: categoryBySales.at(-1)
-          ? `${categoryBySales.at(-1).category} â€” ${peso(categoryBySales.at(-1).totalSales)}`
+          ? `${categoryBySales.at(-1).category} - ${peso(categoryBySales.at(-1).totalSales)}`
           : "No category data",
       },
       {
         metric: "Top Category by Units Sold",
         value: categoryByUnits[0]
-          ? `${categoryByUnits[0].category} â€” ${num(categoryByUnits[0].items_sold)}`
+          ? `${categoryByUnits[0].category} - ${num(categoryByUnits[0].items_sold)}`
           : "No category data",
       },
       {
         metric: "Least Category by Units Sold",
         value: categoryByUnits.at(-1)
-          ? `${categoryByUnits.at(-1).category} â€” ${num(categoryByUnits.at(-1).items_sold)}`
+          ? `${categoryByUnits.at(-1).category} - ${num(categoryByUnits.at(-1).items_sold)}`
           : "No category data",
       },
     ],
@@ -590,7 +623,7 @@ function makeTemplatePdf(report, subtitle) {
       units: num(row.items_sold),
       unitsGrowth:
         index === 0
-          ? "â€”"
+          ? "-"
           : formatPercent(
               ((Number(row.items_sold) - Number(rows[index - 1].items_sold)) /
                 Number(rows[index - 1].items_sold)) *
@@ -627,16 +660,16 @@ function makeTemplatePdf(report, subtitle) {
   );
   title("Part 4: Forecasting");
   figure(
-    "Figure 3. Selected Months + 3-Month Forecast â€” Sales and Demand",
+    "Figure 3. Selected Months + 3-Month Forecast - Sales and Demand",
     forecastRows,
     "predictedValue",
   );
   insight(
     forecastRows.length
-      ? `Revenue forecast: ${forecastRows.map((row) => `${row.month} ${peso(row.predictedValue)}`).join(", ")}. Demand forecast: ${forecastRows.map((row) => `${row.month} ${num(row.predictedUnits)}`).join(", ")}.`
+      ? `Revenue forecast: ${forecastRows.map((row) => `${row.month} ${row.isActual ? `actual ${peso(row.actualValue)}` : peso(row.predictedValue)}`).join(", ")}. Demand forecast: ${forecastRows.map((row) => `${row.month} ${row.isActual ? `actual ${num(row.actualUnits)}` : num(row.predictedUnits)}`).join(", ")}.`
       : "Forecast data was not returned for this period.",
   );
-  subTitle("4.1 Sales Forecast â€” By Month");
+  subTitle("4.1 Sales Forecast - By Month");
   table(
     [
       { header: "Forecasted Month", key: "month", width: 1.3 },
@@ -645,11 +678,11 @@ function makeTemplatePdf(report, subtitle) {
     ],
     forecastRows.map((row) => ({
       month: row.month,
-      sales: peso(row.predictedValue),
-      percentage: "Pending actuals",
+      sales: peso(row.isActual ? row.actualValue : row.predictedValue),
+      percentage: row.isActual ? "Actual" : "Pending actuals",
     })),
   );
-  subTitle("4.2 Demand Forecast â€” By Month");
+  subTitle("4.2 Demand Forecast - By Month");
   table(
     [
       { header: "Forecasted Month", key: "month", width: 1.3 },
@@ -658,8 +691,8 @@ function makeTemplatePdf(report, subtitle) {
     ],
     forecastRows.map((row) => ({
       month: row.month,
-      units: num(row.predictedUnits),
-      percentage: "Pending actuals",
+      units: num(row.isActual ? row.actualUnits : row.predictedUnits),
+      percentage: row.isActual ? "Actual" : "Pending actuals",
     })),
   );
   contributionSection("Part 5: Category Contribution — Sales", report.salesContribution, "revenue", report.salesInsight);
@@ -938,11 +971,11 @@ export default function Reports() {
             params: { monthsAhead: 3, historyMonths: 6 },
           }),
         ]);
-        const demandRows = demandForecast.data.forecast || [];
-        const forecastRows = (revenueForecast.data.forecast || []).map((row, index) => ({
-          ...row,
-          predictedUnits: demandRows[index]?.predictedValue ?? 0,
-        }));
+        const forecastRows = buildReportForecastRows(
+          revenueForecast.data,
+          demandForecast.data,
+          trend.data.rows || [],
+        );
         setPreview({
           ...trend.data,
           title: report.title,
