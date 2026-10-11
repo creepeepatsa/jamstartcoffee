@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, Edit2, KeyRound, Plus, RefreshCcw, Save, Trash2, UserRound, X } from 'lucide-react';
+import { Ban, Check, Edit2, KeyRound, Plus, RefreshCcw, Save, Trash2, UserRound, X } from 'lucide-react';
 
 import api from '../api/axios';
 import ConfirmModal from '../components/ConfirmModal';
@@ -71,6 +71,7 @@ export default function Users() {
   const [selectedPasswordRequest, setSelectedPasswordRequest] = useState(null);
   const [newPassword, setNewPassword] = useState('');
   const [resolvingPasswordRequest, setResolvingPasswordRequest] = useState(false);
+  const [decliningPasswordRequest, setDecliningPasswordRequest] = useState(false);
   const [confirmState, setConfirmState] = useState({
     open: false,
     user: null,
@@ -318,6 +319,25 @@ export default function Users() {
     }
   };
 
+  const handleDeclinePasswordRequest = async (request = selectedPasswordRequest) => {
+    if (!request) return;
+
+    setDecliningPasswordRequest(true);
+    setError('');
+    setSuccess('');
+    try {
+      await api.put(`/users/password-change-requests/${request.id}/decline`);
+      setPasswordRequests((current) => current.filter((item) => item.id !== request.id));
+      if (selectedPasswordRequest?.id === request.id) setSelectedPasswordRequest(null);
+      setNewPassword('');
+      setSuccess('Password change request declined.');
+    } catch (declineError) {
+      setError(declineError?.response?.data?.error || 'Unable to decline the request.');
+    } finally {
+      setDecliningPasswordRequest(false);
+    }
+  };
+
   const openConfirmModal = (user) => {
     setError('');
     setConfirmState({
@@ -531,18 +551,29 @@ export default function Users() {
                   <p className="text-sm font-medium text-emerald-950">{request.email}</p>
                   <p className="mt-1 text-xs text-emerald-900/55">Requested {formatDate(request.requestedAt)}</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedPasswordRequest(request);
-                    setNewPassword('');
-                    setError('');
-                  }}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-900"
-                >
-                  <KeyRound className="h-4 w-4" />
-                  Set new password
-                </button>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleDeclinePasswordRequest(request)}
+                    disabled={decliningPasswordRequest}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Ban className="h-4 w-4" />
+                    Decline
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPasswordRequest(request);
+                      setNewPassword('');
+                      setError('');
+                    }}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-900"
+                  >
+                    <KeyRound className="h-4 w-4" />
+                    Set new password
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -631,8 +662,17 @@ export default function Users() {
                   Cancel
                 </button>
                 <button
+                  type="button"
+                  onClick={handleDeclinePasswordRequest}
+                  disabled={decliningPasswordRequest || resolvingPasswordRequest}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Ban className="h-4 w-4" />
+                  {decliningPasswordRequest ? 'Declining...' : 'Decline request'}
+                </button>
+                <button
                   type="submit"
-                  disabled={resolvingPasswordRequest}
+                  disabled={resolvingPasswordRequest || decliningPasswordRequest}
                   className="rounded-2xl bg-emerald-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-emerald-900 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {resolvingPasswordRequest ? 'Updating...' : 'Update password'}

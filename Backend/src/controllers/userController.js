@@ -74,6 +74,35 @@ export const resolvePasswordChangeRequest = async (req, res) => {
   }
 };
 
+export const declinePasswordChangeRequest = async (req, res) => {
+  try {
+    const requestId = parseInt(req.params.requestId, 10);
+    if (!Number.isInteger(requestId)) {
+      return res.status(400).json({ error: 'Invalid password change request' });
+    }
+
+    const request = await prisma.passwordChangeRequest.findUnique({ where: { id: requestId } });
+    if (!request || request.status !== 'pending') {
+      return res.status(404).json({ error: 'Password change request not found' });
+    }
+
+    await prisma.passwordChangeRequest.update({
+      where: { id: requestId },
+      data: { status: 'declined', resolvedAt: new Date(), resolvedBy: req.user.email },
+    });
+
+    queueActivity(res, {
+      actor: req.user.email,
+      action: `Declined password change request: ${request.email}`,
+    });
+
+    res.json({ message: 'Password change request declined' });
+  } catch (error) {
+    console.error('Decline password change request error:', error);
+    res.status(500).json({ error: 'Failed to decline password change request' });
+  }
+};
+
 export const getUsers = async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;

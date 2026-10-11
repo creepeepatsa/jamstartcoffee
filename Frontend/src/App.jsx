@@ -46,7 +46,7 @@ export default function AppRoutes() {
           <Route
             path="reports"
             element={
-              <ProtectedRoute allowedRoles={['Admin']}>
+              <ProtectedRoute allowedRoles={['Admin', 'Staff']}>
                 <Reports />
               </ProtectedRoute>
             }

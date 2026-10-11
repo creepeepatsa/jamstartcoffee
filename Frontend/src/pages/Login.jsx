@@ -56,9 +56,16 @@ function Login() {
 		setRequesting(true);
 		setRequestError('');
 		setRequestStatus('');
+		const normalizedEmail = requestEmail.trim().toLowerCase();
+
+		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+			setRequestError('Enter a valid email address.');
+			setRequesting(false);
+			return;
+		}
 
 		try {
-			const response = await api.post('/auth/password-change-requests', { email: requestEmail });
+			const response = await api.post('/auth/password-change-requests', { email: normalizedEmail });
 			setRequestStatus(response.data.message);
 			setRequestEmail('');
 		} catch (err) {

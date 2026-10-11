@@ -211,6 +211,18 @@ export const requestPasswordChange = async (req, res) => {
       return res.status(400).json({ error: 'Email is required' });
     }
 
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Enter a valid email address' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' } },
+      select: { id: true, isActive: true },
+    });
+    if (!user || !user.isActive) {
+      return res.status(404).json({ error: 'No active account was found for that email address' });
+    }
+
     const existingRequest = await prisma.passwordChangeRequest.findFirst({
       where: { email, status: 'pending' },
     });

@@ -615,6 +615,36 @@ export const archiveSale = async (req, res) => {
   }
 };
 
+export const archiveSales = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids)
+      ? [...new Set(req.body.ids.map(Number))]
+      : [];
+
+    if (!ids.length || ids.some((id) => !Number.isInteger(id) || id < 1)) {
+      return res.status(400).json({ error: 'At least one valid sale id is required' });
+    }
+
+    const result = await prisma.sale.updateMany({
+      where: { id: { in: ids }, archivedAt: null },
+      data: { archivedAt: new Date(), archivedBy: req.user?.email || 'unknown' },
+    });
+
+    if (!result.count) {
+      return res.status(404).json({ error: 'No active sale records were found' });
+    }
+
+    queueActivity(res, {
+      actor: req.user?.email || 'unknown',
+      action: `Archived ${result.count} sale records`,
+    });
+    res.json({ archived: result.count });
+  } catch (error) {
+    console.error('Bulk archive error:', error);
+    res.status(500).json({ error: 'Unable to archive sale records' });
+  }
+};
+
 export const restoreSale = async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -730,12 +760,23 @@ export const getItems = async (req, res) => {
   try {
     const items = await prisma.sale.findMany({
       where: { archivedAt: null },
-      distinct: ['item_name'],
-      select: { item_name: true },
-      orderBy: { item_name: 'asc' },
+      select: { item_name: true, category: true, net_price: true },
+      orderBy: [{ item_name: 'asc' }, { date: 'desc' }],
     });
 
-    res.json({ items: items.map((item) => item.item_name) });
+    const uniqueItems = [];
+    const seenItems = new Set();
+    for (const item of items) {
+      if (seenItems.has(item.item_name)) continue;
+      seenItems.add(item.item_name);
+      uniqueItems.push({
+        item_name: item.item_name,
+        category: item.category,
+        net_price: Number(item.net_price),
+      });
+    }
+
+    res.json({ items: uniqueItems });
   } catch (error) {
     console.error('Get items error:', error);
     res.status(500).json({ error: 'Failed to fetch items' });

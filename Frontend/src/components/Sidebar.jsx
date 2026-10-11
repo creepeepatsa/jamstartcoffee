@@ -26,6 +26,7 @@ const adminNavItems = [
 const userNavItems = [
   { label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
   { label: 'Sales', icon: ClipboardList, path: '/sales' },
+  { label: 'Reports', icon: BarChart3, path: '/reports' },
   { label: 'Forecasting', icon: LineChart, path: '/forecasts' },
 ];
 

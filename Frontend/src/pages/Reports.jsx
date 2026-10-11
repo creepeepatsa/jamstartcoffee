@@ -1,17 +1,13 @@
 ﻿import { useEffect, useState } from "react";
 import {
-  BarChart3,
   Calendar,
-  ClipboardList,
   Download,
   Eye,
-  FileSpreadsheet,
   FileText,
   LineChart,
-  Package,
   X,
 } from "lucide-react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { jsPDF } from "jspdf";
 import api from "../api/axios";
 
@@ -46,7 +42,6 @@ const rangeBounds = (fromDate, toDate) => {
   if (endDate) bounds.endDate = endDate;
   return bounds;
 };
-const csvValue = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
 const formatCompactNumber = (value) =>
   new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(
     Number(value || 0),
@@ -135,38 +130,6 @@ function downloadFile(content, filename, type) {
   link.click();
   URL.revokeObjectURL(url);
 }
-function downloadExcel(columns, rows, filename) {
-  const html = `<table><thead><tr>${columns.map((column) => `<th>${column.header}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${row[column.key] ?? ""}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
-  downloadFile(
-    `<html><meta charset="utf-8"><body>${html}</body></html>`,
-    filename,
-    "application/vnd.ms-excel",
-  );
-}
-
-function insightFor(report) {
-  const rows = report.rows || [];
-  if (!rows.length) return "No observations were returned for this selection.";
-  if (report.reportType === "forecasting") {
-    const first = Number(rows[0].predictedValue || 0);
-    const last = Number(rows.at(-1).predictedValue || 0);
-    const change = first ? ((last - first) / first) * 100 : 0;
-    return `Using the latest six months as its basis, the model projects ${change >= 0 ? "growth" : "a decline"} of ${Math.abs(change).toFixed(1)}% across the forecast horizon, ending at ${num(last)} projected units.`;
-  }
-  const first = Number(rows[0].totalSales || 0);
-  const last = Number(rows.at(-1).totalSales || 0);
-  const change = first ? ((last - first) / first) * 100 : 0;
-  const peak = rows.reduce(
-    (best, row) => (Number(row.totalSales) > Number(best.totalSales) ? row : best),
-    rows[0],
-  );
-  const low = rows.reduce(
-    (best, row) => (Number(row.totalSales) < Number(best.totalSales) ? row : best),
-    rows[0],
-  );
-  return `Sales ${change >= 0 ? "grew" : "declined"} ${Math.abs(change).toFixed(1)}% from the first to the last selected month. Sales peaked in ${peak.month} at ${peso(peak.totalSales)} and were lowest in ${low.month} at ${peso(low.totalSales)}.`;
-}
-
 function drawChart(pdf, rows, key, x, y, width, height, color, label) {
   if (!rows.length) return;
   const values = rows.map((row) => Number(row[key] || 0));
@@ -324,26 +287,6 @@ function makeTemplatePdf(report, subtitle) {
     pdf.text(lines, margin, y);
     y += blockHeight;
   };
-  const insight = (value) => {
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(8.2);
-    const lines = pdf.splitTextToSize(String(value), contentWidth - 12);
-    const boxHeight = Math.max(20, lines.length * 4.1 + 11);
-    if (y + boxHeight > height - 20) {
-      pdf.addPage();
-      header();
-      y = 34;
-    }
-    pdf.setFillColor(...colors.pale);
-    pdf.roundedRect(margin, y, contentWidth, boxHeight, 2.5, 2.5, "F");
-    pdf.setTextColor(...colors.forest);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(7.5);
-    pdf.text("INSIGHT", margin + 4, y + 6);
-    pdf.setTextColor(...colors.ink);
-    pdf.text(lines, margin + 4, y + 12);
-    y += boxHeight + 10;
-  };
   const table = (columns, values, rowHeight = 7) => {
     const widths = columns.map((column) => column.width || 1);
     const total = widths.reduce((sum, value) => sum + value, 0);
@@ -478,11 +421,7 @@ function makeTemplatePdf(report, subtitle) {
   const categoryByUnits = [...categoryRows].sort(
     (a, b) => Number(b.items_sold || 0) - Number(a.items_sold || 0),
   );
-  const itemInsight =
-    itemBySales[0] && itemByUnits[0]
-      ? `${itemBySales[0].item_name || itemBySales[0].item} leads sales at ${peso(itemBySales[0].totalSales)} while ${itemByUnits[0].item_name || itemByUnits[0].item} leads volume at ${num(itemByUnits[0].items_sold)} units.`
-      : insightFor(report);
-  const contributionSection = (sectionTitle, contribution, metric, aiInsight) => {
+  const contributionSection = (sectionTitle, contribution, metric) => {
     if (!contribution?.length) return;
     const months = contribution.map((entry) => entry.month);
     const categories = [...new Set(contribution.flatMap((entry) => (entry.categories || []).map((item) => item.category)))];
@@ -490,15 +429,24 @@ function makeTemplatePdf(report, subtitle) {
     text("Estimated from each category's average share across the last six actual months; this is not a separate category forecast.", 8.2);
     table(
       [{ header: "Category", key: "category", width: 1.4 }, ...months.map((month) => ({ header: month, key: month, width: 1 }))],
-      categories.map((category) => ({
-        category,
-        ...Object.fromEntries(months.map((month) => {
-          const item = (contribution.find((entry) => entry.month === month)?.categories || []).find((entry) => entry.category === category);
-          return [month, item ? `${metric === "revenue" ? peso(item.amount) : num(item.amount)} (${item.percentage.toFixed(1)}%)` : "—"];
+      [
+        ...categories.map((category) => ({
+          category,
+          ...Object.fromEntries(months.map((month) => {
+            const item = (contribution.find((entry) => entry.month === month)?.categories || []).find((entry) => entry.category === category);
+            return [month, item ? `${metric === "revenue" ? peso(item.amount) : num(item.amount)} (${item.percentage.toFixed(1)}%)` : "—"];
+          })),
         })),
-      })),
+        {
+          category: "Total",
+          ...Object.fromEntries(months.map((month) => {
+            const total = (contribution.find((entry) => entry.month === month)?.categories || [])
+              .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+            return [month, `${metric === "revenue" ? peso(total) : num(total)} (100.0%)`];
+          })),
+        },
+      ],
     );
-    if (aiInsight) insight(aiInsight);
   };
 
   header();
@@ -597,7 +545,6 @@ function makeTemplatePdf(report, subtitle) {
       },
     ],
   );
-  insight(itemInsight);
   title("Part 2: Month-to-Month Trend");
   figure(
     `Figure 1. Monthly Sales and Demand, ${subtitle}`,
@@ -606,7 +553,6 @@ function makeTemplatePdf(report, subtitle) {
     colors.forest,
     "items_sold",
   );
-  insight(insightFor(report));
   subTitle("Month-to-Month Comparison Table");
   table(
     [
@@ -653,21 +599,11 @@ function makeTemplatePdf(report, subtitle) {
     ],
     leastItems,
   );
-  insight(
-    leastItems[0]
-      ? `${leastItems[0].item} recorded the lowest units sold (${leastItems[0].units}) for the period and may be a candidate for menu review or promotion.`
-      : "No item ranking data was returned.",
-  );
   title("Part 4: Forecasting");
   figure(
     "Figure 3. Selected Months + 3-Month Forecast - Sales and Demand",
     forecastRows,
     "predictedValue",
-  );
-  insight(
-    forecastRows.length
-      ? `Revenue forecast: ${forecastRows.map((row) => `${row.month} ${row.isActual ? `actual ${peso(row.actualValue)}` : peso(row.predictedValue)}`).join(", ")}. Demand forecast: ${forecastRows.map((row) => `${row.month} ${row.isActual ? `actual ${num(row.actualUnits)}` : num(row.predictedUnits)}`).join(", ")}.`
-      : "Forecast data was not returned for this period.",
   );
   subTitle("4.1 Sales Forecast - By Month");
   table(
@@ -695,8 +631,8 @@ function makeTemplatePdf(report, subtitle) {
       percentage: row.isActual ? "Actual" : "Pending actuals",
     })),
   );
-  contributionSection("Part 5: Category Contribution — Sales", report.salesContribution, "revenue", report.salesInsight);
-  contributionSection("Part 6: Category Contribution — Demand", report.demandContribution, "units", report.demandInsight);
+  contributionSection("Part 5: Category Contribution — Sales", report.salesContribution, "revenue");
+  contributionSection("Part 6: Category Contribution — Demand", report.demandContribution, "units");
   text(
     "Category-level forecast values are allocated top-down from the overall SARIMA forecast, using each category's recent historical share of total sales/demand.",
     8.2,
@@ -722,7 +658,6 @@ function makePdf(report, subtitle) {
   const margin = 16;
   const rows = report.rows || [];
   const forecast = report.reportType === "forecasting";
-  const insight = insightFor(report);
   const colors = {
     forest: [6, 78, 59],
     ink: [20, 55, 42],
@@ -796,20 +731,6 @@ function makePdf(report, subtitle) {
     });
     y += 6;
   };
-  const insightBox = () => {
-    ensure(28);
-    pdf.setFillColor(...colors.pale);
-    pdf.roundedRect(margin, y, width - margin * 2, 22, 2, 2, "F");
-    pdf.setTextColor(...colors.forest);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(8);
-    pdf.text("INSIGHT", margin + 4, y + 6);
-    pdf.setFont("helvetica", "normal");
-    pdf.setTextColor(...colors.ink);
-    pdf.setFontSize(8.5);
-    pdf.text(pdf.splitTextToSize(insight, width - margin * 2 - 8), margin + 4, y + 12);
-    y += 30;
-  };
   header();
   y = 39;
   pdf.setTextColor(...colors.ink);
@@ -843,7 +764,6 @@ function makePdf(report, subtitle) {
           { metric: "Months analyzed", value: rows.length },
         ],
   );
-  insightBox();
   heading(forecast ? "Part 2: Forecast outlook" : "Part 2: Month-to-month trend");
   ensure(62);
   pdf.setFont("helvetica", "bold");
@@ -883,7 +803,6 @@ function makePdf(report, subtitle) {
     );
     y += 50;
   }
-  insightBox();
   heading(forecast ? "Forecast comparison" : "Month-to-month comparison");
   table(
     forecast
@@ -920,7 +839,6 @@ function makePdf(report, subtitle) {
 }
 
 export default function Reports() {
-  const navigate = useNavigate();
   const location = useLocation();
   const [activeReport, setActiveReport] = useState(null);
   const [fromDate, setFromDate] = useState("all");
@@ -1024,21 +942,6 @@ export default function Reports() {
         link.download = `${filename}.pdf`;
         link.click();
       }
-      if (format === "csv") {
-        const columns =
-          preview.reportType === "forecasting"
-            ? [
-                { header: "Month", key: "month" },
-                { header: "Projected value", key: "predictedValue" },
-              ]
-            : preview.columns;
-        downloadFile(
-          `${columns.map((column) => csvValue(column.header)).join(",")}\n${preview.rows.map((row) => columns.map((column) => csvValue(row[column.key])).join(",")).join("\n")}`,
-          `${filename}.csv`,
-          "text/csv;charset=utf-8",
-        );
-      }
-      if (format === "xlsx") downloadExcel(preview.columns, preview.rows, `${filename}.xls`);
     } finally {
       setExporting(false);
     }
@@ -1046,35 +949,6 @@ export default function Reports() {
 
   return (
     <section className="grid gap-6">
-      <div className="overflow-hidden rounded-[1.5rem] border border-emerald-900/10 bg-[#fbfaf7] shadow-sm shadow-emerald-950/5">
-        <div className="flex items-start gap-4 border-b border-emerald-900/10 px-6 py-5">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700">
-            <Package className="h-5 w-5" />
-          </div>
-          <div>
-            <h2 className="text-3xl font-semibold tracking-tight text-emerald-950">
-              Sales Management
-            </h2>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 px-5 pt-3">
-          <button
-            type="button"
-            onClick={() => navigate("/sales")}
-            className="inline-flex items-center gap-2 border-b-2 border-transparent px-3 py-2 text-sm font-medium text-emerald-900/70"
-          >
-            <ClipboardList className="h-4 w-4" />
-            Sales Records
-          </button>
-          <button
-            type="button"
-            className="inline-flex items-center gap-2 border-b-2 border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-700"
-          >
-            <BarChart3 className="h-4 w-4" />
-            Reports
-          </button>
-        </div>
-      </div>
       <section className="rounded-[1.75rem] border border-emerald-900/10 bg-[#fbfaf7] p-6 shadow-sm shadow-emerald-950/5 sm:p-8">
         <div className="mb-6 flex items-center gap-3">
           <FileText className="h-5 w-5 text-emerald-700" />
@@ -1195,24 +1069,6 @@ export default function Reports() {
                   >
                     <Download className="h-4 w-4" />
                     PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportReport("csv")}
-                    disabled={!preview || exporting}
-                    className="inline-flex items-center gap-2 rounded-xl border border-emerald-900/10 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-900 disabled:opacity-50"
-                  >
-                    <FileText className="h-4 w-4" />
-                    CSV
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportReport("xlsx")}
-                    disabled={!preview || exporting}
-                    className="inline-flex items-center gap-2 rounded-xl border border-emerald-900/10 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-900 disabled:opacity-50"
-                  >
-                    <FileSpreadsheet className="h-4 w-4" />
-                    Excel
                   </button>
                 </div>
               </div>

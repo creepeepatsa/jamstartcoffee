@@ -286,6 +286,18 @@ function CategoryContributionTable({ contribution, target }) {
                 })}
               </tr>
             ))}
+            <tr className="border-t-2 border-emerald-900/15 bg-emerald-50/60 font-semibold">
+              <td className="py-2 pr-4 text-emerald-950">Total</td>
+              {months.map((month) => {
+                const total = (month.categories || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+                return (
+                  <td key={`total-${month.month}`} className="px-3 py-2 text-right text-emerald-950">
+                    <span className="block">{formatValue(total, target)}</span>
+                    <span className="text-xs text-emerald-900/60">100.0%</span>
+                  </td>
+                );
+              })}
+            </tr>
           </tbody>
         </table>
       </div>
