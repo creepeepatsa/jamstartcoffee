@@ -26,19 +26,18 @@ if (!API_BASE) {
 
 const MONTH_OPTIONS = [3, 6, 12];
 
-// key -> display label + copy for the two pretrained models. Matches the
-// "key" values forecast_service.py's PRETRAINED_MODEL_META expects
-// ("sarima", "demand").
+// API keys are retained for compatibility; the backend now serves Holt-Winters
+// models for both forecast cards.
 const PRETRAINED_MODELS = [
   {
     key: 'sarima',
-    label: 'FORECASTS',
-    eyebrow: 'Pretrained model',
+    label: 'Sales forecast',
+    eyebrow: 'Holt-Winters model',
   },
   {
     key: 'demand',
     label: 'Demand forecast',
-    eyebrow: 'Pretrained model',
+    eyebrow: 'Holt-Winters model',
   },
 ];
 
@@ -355,7 +354,7 @@ export default function Forecasts() {
     return () => window.removeEventListener('sales-data-changed', handleSalesDataChanged);
   }, [pretrainedMonthsAhead]);
 
-  // --- Sales forecast (sarima) -- the primary panel, with its own summary card ---
+  // --- Sales forecast -- the primary panel, with its own summary card ---
   const salesData = pretrained.sarima;
   const salesLoading = pretrainedLoading.sarima;
   const salesError = pretrainedError.sarima;
@@ -388,7 +387,7 @@ export default function Forecasts() {
         </div>
       </div>
 
-      {/* Sales forecast chart (sarima model) */}
+      {/* Sales forecast chart */}
       <div className="rounded-[1.5rem] border border-emerald-900/10 bg-white p-6 sm:p-8">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">

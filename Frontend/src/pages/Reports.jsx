@@ -634,7 +634,7 @@ function makeTemplatePdf(report, subtitle) {
   contributionSection("Part 5: Category Contribution — Sales", report.salesContribution, "revenue");
   contributionSection("Part 6: Category Contribution — Demand", report.demandContribution, "units");
   text(
-    "Category-level forecast values are allocated top-down from the overall SARIMA forecast, using each category's recent historical share of total sales/demand.",
+    "Category-level forecast values are allocated top-down from the overall sales forecast, using each category's recent historical share of total sales/demand.",
     8.2,
   );
   pdf.setDrawColor(...colors.line);
